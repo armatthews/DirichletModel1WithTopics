@@ -77,6 +77,8 @@ class DirichletMultinomial:
 		assert k >= 0 and k < self.K
 		self.counts[k] -= 1
 		self.N -= 1
+		if self.counts[k] == 0:
+			del self.counts[k]
 
 	def probability(self, k):
 		assert k >= 0 and k < self.K
