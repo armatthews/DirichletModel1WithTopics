@@ -4,12 +4,13 @@ import sys
 import argparse
 import os
 import cPickle as pickle
+from prior import SampledPrior, GammaPrior, FixedValue
 from nltk.tokenize import sent_tokenize, word_tokenize
 from collections import defaultdict, Counter
 import math
 numpy.random.seed(0)
 
-class Vocabulary:
+class Vocabulary(object):
 	def __init__(self, use_null=False):
 		self.vocabulary = []
 		self.wordToId = {}
@@ -40,7 +41,7 @@ class Vocabulary:
 		for word in self.vocabulary:
 			yield word
 
-class Document:
+class Document(object):
 	def __init__(self, text):
 		self.counter = Counter()
 		text = text.lower()	
@@ -61,7 +62,7 @@ class Document:
 			for i in range(self.counter[key]):
 				yield key
 
-class DirichletMultinomial:
+class DirichletMultinomial(object):
 	def __init__(self, K, alpha):
 		self.K = K
 		self.alpha = 1.0 * alpha
@@ -86,7 +87,7 @@ class DirichletMultinomial:
 		denominator = self.alpha * self.K + self.N
 		return numerator / denominator
 
-class ChineseRestaurantProcess:
+class ChineseRestaurantProcess(object):
 	def __init__(self):
 		self.tables_by_dish = {}
 		self.customers_by_dish = {}
@@ -192,12 +193,19 @@ class DirichletProcess(ChineseRestaurantProcess):
 		if updateBase:
 			self.base.decrement(dish)	
 
-class DirichletModel1:
+class DirichletModel1WithTopics(object):
 	def __init__(self, K, alpha, beta0, beta1, data, french_vocabulary, english_vocabulary, use_null=True):
 		self.K = K
-		self.alpha = alpha
-		self.beta0 = beta0
-		self.beta1 = beta1
+
+		self.alpha_prior = alpha if isinstance(alpha, SampledPrior) else FixedValue(alpha)
+		self.alpha_prior.tie(self)	
+
+		self.beta0_prior = beta0 if isinstance(beta0, SampledPrior) else FixedValue(beta0)
+		self.beta0_prior.tie(self)
+
+		self.beta1_prior = beta1 if isinstance(beta1, SampledPrior) else FixedValue(beta1)
+		self.beta1_prior.tie(self)
+
 		self.data = data
 		self.french_vocabulary = french_vocabulary
 		self.english_vocabulary = english_vocabulary
@@ -223,6 +231,11 @@ class DirichletModel1:
 			for n, e in enumerate(E):
 				self.assign_topicless_alignment(s, n, F, e)
 				self.assign_topic(s, n, F, e)
+
+	alpha = property(lambda self: self.alpha_prior.x)
+	beta0 = property(lambda self: self.beta0_prior.x)
+	beta1 = property(lambda self: self.beta1_prior.x)
+
 
 	def fix_alignments(self, alignments):
 		self.alignments = alignments
@@ -275,6 +288,16 @@ class DirichletModel1:
 		self.sentence_topics[s].decrement(z)
 
 	def iterate(self, i):
+		if i % 10 == 0:	
+			self.alpha_prior.resample(10)
+			print >>sys.stderr, 'Alpha is now %f' % self.alpha
+	
+			self.beta0_prior.resample(10)
+			print >>sys.stderr, 'Beta0 is now %f' % self.beta0
+
+			self.beta1_prior.resample(10)
+			print >>sys.stderr, 'Beta1 is now %f' % self.beta1
+
 		for s, (F, E) in enumerate(self.data):
 			for n, e in enumerate(E):
 				if not self.alignments_fixed:
@@ -315,14 +338,13 @@ class DirichletModel1:
 
 				log_likelihood += math.log(self.topic_ttables[z][f].probability(e))
 				log_likelihood += math.log(self.sentence_topics[s].probability(z))
-			log_likelihood += dirichlet_log_prob([self.sentence_topics[s].probability(k) for k in range(self.K)], self.alpha)
+			#log_likelihood += dirichlet_log_prob([self.sentence_topics[s].probability(k) for k in range(self.K)], self.alpha)
 
 		for f in range(self.FV):
 			for k in range(self.K):
-				#log_likelihood += log(dp_prob(self.topic_ttable[f], self.topic.ttable[f], self.beta1)
+				#log_likelihood += dp_log_prob(self.topic_ttables[k][f], self.ttable[f], self.beta1)
 				pass
 			#log_likelihood += dirichlet_log_prob([self.ttable[f].probability(e) for e in range(self.EV)], self.beta0)
-			pass
 
 		return log_likelihood
 		
@@ -332,6 +354,9 @@ class DirichletModel1:
 		word_count = sum(len(E) for (F, E) in data)
 		return math.exp(-log_likelihood / word_count)
 
+	def get_parameters(self):
+		return (self.alpha, self.beta0, self.beta1)
+
 def draw_from_multinomial(probabilities):
 	prob_sum = sum(probabilities)
 	probabilities = [p / prob_sum for p in probabilities]
@@ -339,9 +364,24 @@ def draw_from_multinomial(probabilities):
 
 def dirichlet_log_prob(X, a):
 	k = len(X)
-	P = sum([(a - 1) * x for x in X])
+	P = sum([(a - 1) * math.log(x) for x in X])
 	B = k * scipy.special.gammaln(a) - scipy.special.gammaln(k * a)
 	return P - B
+
+def dp_log_prob(dp, base, alpha):
+	log_prob = 0.0
+
+	customers_by_dish = Counter()
+	N = 0
+
+	for dish, tables in dp.tables_by_dish.iteritems():
+		for table_index, customer_count in enumerate(tables):
+			for person_index in range(customer_count):
+				log_prob += math.log(alpha * base.probability(dish) + customers_by_dish[dish]) - math.log(alpha + N)
+				customers_by_dish[dish] += 1
+				N += 1
+
+	return log_prob	
 
 def load_data(filename, use_null):
 	data = []
@@ -399,7 +439,7 @@ if __name__ == "__main__":
 	parser.add_argument('output_dir')
 	parser.add_argument('--num_iterations', type=int, default=100)
 	parser.add_argument('--num_topics', type=int, default=3)
-	parser.add_argument('--alpha', type=float, default=1.0)
+	parser.add_argument('--alpha', type=float, default=0.1)
 	parser.add_argument('--beta0', type=float, default=0.002)
 	parser.add_argument('--beta1', type=float, default=1.0)
 	parser.add_argument('--aligns')
@@ -414,7 +454,8 @@ if __name__ == "__main__":
 	data, french_vocabulary, english_vocabulary = load_data(args.corpus, allow_null)
 
 	print >>sys.stderr, 'Initializing model...'
-	model = DirichletModel1(args.num_topics, args.alpha, args.beta0, args.beta1, data, french_vocabulary, english_vocabulary, allow_null)
+	model = DirichletModel1WithTopics(args.num_topics, args.alpha, args.beta0, args.beta1, data, french_vocabulary, english_vocabulary, allow_null)
+	#model = DirichletModel1WithTopics(args.num_topics, GammaPrior(1.0, 1.0, args.alpha), GammaPrior(1.0, 1.0, args.beta0), GammaPrior(1.0, 1.0, args.beta1), data, french_vocabulary, english_vocabulary, allow_null)
 
 	if args.aligns != None:
 		print >>sys.stderr, 'Loading gold alignments...'
@@ -425,3 +466,4 @@ if __name__ == "__main__":
 	for i in range(1, args.num_iterations + 1):
 		model.iterate(i)
 		output_iteration(i, model, args.output_dir)
+	print >>sys.stderr, 'Final parameter values:', model.get_parameters()

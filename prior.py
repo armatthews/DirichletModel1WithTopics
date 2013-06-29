@@ -1,10 +1,11 @@
 import math
 import random
-
+import sys
+random.seed(0)
 # This code was taken largely from Victor Chahuneau's vpyp repository.
 # See https://github.com/vchahun/vpyp/blob/master/vpyp/prior.py
 
-class SampledPrior:
+class SampledPrior(object):
 	def __init__(self):
 		self.tied_distributions = []
 
@@ -22,6 +23,7 @@ class SampledPrior:
 			new_parameters = self.parameters
 
 			new_log_likelihood = self.full_log_likelihood()
+
 			old_log_q = self.proposal_log_likelihood(new_parameters, old_parameters)
 			new_log_q = self.proposal_log_likelihood(old_parameters, new_parameters)
 			log_acceptance = (new_log_likelihood - old_log_likelihood) + (old_log_q - new_log_q)
@@ -31,7 +33,36 @@ class SampledPrior:
 			elif random.random() < math.exp(log_acceptance):
 				old_log_likelihood = new_log_likelihood
 			else:
-				self.parameters = old_parameters
+				self.set_parameters(old_parameters)
+
+class FixedValue(SampledPrior):
+	"""Fake prior that represents a single fixed value"""
+	def __init__(self, x):
+		SampledPrior.__init__(self)
+		self.x = x
+
+	def log_likelihood(self):
+		return 0.0
+
+	def sample_parameters(self):
+		pass
+
+	def proposal_log_likelihood(self, old_parameters, new_parameters):
+		if old_parameters == new_parameters:
+			return 0.0
+		else:
+			return -float("inf")
+
+	def resample(self, num_iters):
+		pass
+
+	def get_parameters(self):
+		return (self.x,)
+
+	def set_parameters(self, new_parameters):	
+		(self.x,) = new_parameters	
+
+	parameters = property(get_parameters, set_parameters)
 
 class GammaPrior(SampledPrior):
 	"""Prior for parameters with range (0, +inf)"""
@@ -41,16 +72,14 @@ class GammaPrior(SampledPrior):
 		assert x == None or x > 0.0
 
 		SampledPrior.__init__(self)
-		if x == None:
-			 x = random.gammavariate(self.k, self.theta)
 
 		self.k = k
 		self.theta = theta
-		self.x = x
+		self.x = x if x is not None else random.gammavariate(self.k, self.theta)
 
 	@staticmethod
 	def log_pdf(k, theta, x):	
-		return math.lgamma(k) - k * math.log(theta) + (k - 1) * math.log(x) - x / theta
+		return -math.lgamma(k) - k * math.log(theta) + (k - 1) * math.log(x) - x / theta
 
 	def log_likelihood(self):
 		return self.log_pdf(self.k, self.theta, self.x)
@@ -72,8 +101,8 @@ class GammaPrior(SampledPrior):
 	def get_parameters(self):
 		return (self.x,)
 
-	def set_parameters(self, new_parameters):
-		(self.x,) = new_parameters
+	def set_parameters(self, new_parameters):	
+		(self.x,) = new_parameters	
 
 	parameters = property(get_parameters, set_parameters)
 
@@ -123,3 +152,10 @@ class BetaPrior(SampledPrior):
 		(self.x,) = new_parameters
 
 	parameters = property(get_parameters, set_parameters)
+
+if __name__ == "__main__":
+	prior = GammaPrior(1000.0, 0.001, 1.0)
+	print prior.x
+	for _ in range(100):
+		prior.resample(10)
+		print prior.x

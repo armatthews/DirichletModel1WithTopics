@@ -1,1 +1,4 @@
 *.pyc
+data/
+*Output*/
+output*.txt
