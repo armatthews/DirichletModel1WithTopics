@@ -4,201 +4,25 @@ import sys
 import argparse
 import os
 import cPickle as pickle
+from vocabulary import Vocabulary
+from probability import DirichletMultinomial, DirichletProcess, draw_from_multinomial
 from prior import SampledPrior, GammaPrior, FixedValue
 from nltk.tokenize import sent_tokenize, word_tokenize
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, namedtuple
 import math
 numpy.random.seed(0)
 
-class Vocabulary(object):
-	def __init__(self, use_null=False):
-		self.vocabulary = []
-		self.wordToId = {}
-		if use_null:
-			self.null_word = ''
-			self.vocabulary.append(self.null_word)
-			self.wordToId[self.null_word] = 0
-
-	def getId(self, word):
-		if word in self.wordToId:
-			return self.wordToId[word]
-		else:
-			newId = len(self.vocabulary)
-			self.vocabulary.append(word)
-			self.wordToId[word] = newId
-			return newId
-
-	def getWord(self, Id):
-		return self.vocabulary[Id]
-
-	def __len__(self):
-		return len(self.vocabulary)
-
-	def __contains__(self, key):
-		return key in self.vocabulary
-
-	def __iter__(self):
-		for word in self.vocabulary:
-			yield word
-
-class Document(object):
-	def __init__(self, text):
-		self.counter = Counter()
-		text = text.lower()	
-		words = tokenize(text)
-		self.length = len(words)
-
-		for word in words:
-			self.counter[word] += 1
-
-	def __getitem__(self, word):
-		return self.counter[word]
-
-	def __len__(self):
-		return self.length
-
-	def __iter__(self):
-		for key in self.counter.keys():
-			for i in range(self.counter[key]):
-				yield key
-
-class DirichletMultinomial(object):
-	def __init__(self, K, alpha):
-		self.K = K
-		self.alpha = 1.0 * alpha
-		self.counts = Counter()
-		self.N = 0
-
-	def increment(self, k):
-		assert k >= 0 and k < self.K
-		self.counts[k] += 1
-		self.N += 1
-
-	def decrement(self, k):
-		assert k >= 0 and k < self.K
-		self.counts[k] -= 1
-		self.N -= 1
-		if self.counts[k] == 0:
-			del self.counts[k]
-
-	def probability(self, k):
-		assert k >= 0 and k < self.K
-		numerator = self.alpha + self.counts[k]
-		denominator = self.alpha * self.K + self.N
-		return numerator / denominator
-
-class ChineseRestaurantProcess(object):
-	def __init__(self):
-		self.tables_by_dish = {}
-		self.customers_by_dish = {}
-		self.num_tables = 0
-		self.num_customers = 0
-
-	# Seat a customer at the table_index'th table
-	# that is labeled with the given dish.
-	# If table_index is None, then a new table is created
-	# and labled with the given dish.
-	# Return value is whether the customer was
-	# seated at a new table.
-	def seat_customer(self, dish, table_index):
-		table_created = False
-
-		if dish not in self.tables_by_dish:
-			self.tables_by_dish[dish] = []
-			self.customers_by_dish[dish] = 0
-
-		if table_index == None:
-			self.tables_by_dish[dish].append(0)
-			self.num_tables += 1
-			table_index = len(self.tables_by_dish[dish]) - 1
-			table_created = True
-
-		assert table_index >= 0
-		assert table_index < len(self.tables_by_dish[dish])
-
-		self.tables_by_dish[dish][table_index] += 1
-		self.customers_by_dish[dish] += 1
-		self.num_customers += 1
-		return table_created
-
-	# Eject a customer from the table_index'th table
-	# that is labeled with the given dish.
-	# Return value is whether the ejectee was the last
-	# customer at his table.
-	def eject_customer(self, dish, table_index):
-		assert dish in self.tables_by_dish
-		assert table_index >= 0
-		assert table_index < len(self.tables_by_dish[dish])
-		table_removed = False
-
-		self.tables_by_dish[dish][table_index] -= 1
-		self.customers_by_dish[dish] -= 1
-		self.num_customers -= 1
-
-		if self.tables_by_dish[dish][table_index] == 0:
-			del self.tables_by_dish[dish][table_index]
-			self.num_tables -= 1
-			table_removed = True
-
-		if self.customers_by_dish[dish] == 0:
-			del self.customers_by_dish[dish]
-			del self.tables_by_dish[dish]
-
-		return table_removed
-
-	def eject_random_customer(self, dish):
-		i = numpy.random.randint(0, self.customers_by_dish[dish])
-		for table_index, customers in enumerate(self.tables_by_dish[dish]):
-			if i < customers:
-				return self.eject_customer(dish, table_index)
-			else:
-				i -= customers
-		raise Exception()
-		
-	def output(self):
-		for dish in self.tables_by_dish.keys():
-			print 'There are %d customers at %d tables serving %s with populations %s.' % \
-				(self.customers_by_dish[dish], len(self.tables_by_dish[dish]), str(dish), ' '.join([str(n) for n in self.tables_by_dish[dish]]))
-
-class DirichletProcess(ChineseRestaurantProcess):
-	def __init__(self, strength, base):
-		ChineseRestaurantProcess.__init__(self)
-		self.strength = 1.0 * strength
-		self.base = base
-
-	def probability(self, dish):
-		numerator = self.strength * self.base.probability(dish)
-		numerator += self.customers_by_dish[dish] if dish in self.customers_by_dish else 0.0
-		denominator = self.strength + self.num_customers
-		assert numerator / denominator >= 0.0
-		assert numerator / denominator <= 1.0
-		return numerator / denominator
-
-	def tables_serving_dish(self, dish):
-		if dish in self.tables_by_dish:
-			for table_index, num_customers in enumerate(self.tables_by_dish[dish]):
-				yield table_index, num_customers
-		yield None, self.strength * self.base.probability(dish)
-
-	def increment(self, dish):
-		table = draw_from_multinomial([num_customers for table_index, num_customers in self.tables_serving_dish(dish)])
-		if dish not in self.tables_by_dish or table >= len(self.tables_by_dish[dish]):
-			table = None
-		updateBase = self.seat_customer(dish, table)
-		if updateBase:
-			self.base.increment(dish)
-
-	def decrement(self, dish):
-		updateBase = self.eject_random_customer(dish)
-		if updateBase:
-			self.base.decrement(dish)	
+ParallelSentence = namedtuple('ParallelSentence', 'F, E, document_id')
 
 class DirichletModel1WithTopics(object):
-	def __init__(self, K, alpha, beta0, beta1, data, french_vocabulary, english_vocabulary, use_null=True):
+	def __init__(self, K, alpha0, alpha1, beta0, beta1, data, french_vocabulary, english_vocabulary, document_ids):
 		self.K = K
 
-		self.alpha_prior = alpha if isinstance(alpha, SampledPrior) else FixedValue(alpha)
-		self.alpha_prior.tie(self)	
+		self.alpha0_prior = alpha0 if isinstance(alpha0, SampledPrior) else FixedValue(alpha0)
+		self.alpha0_prior.tie(self)
+
+		self.alpha1_prior = alpha1 if isinstance(alpha1, SampledPrior) else FixedValue(alpha1)
+		self.alpha1_prior.tie(self)	
 
 		self.beta0_prior = beta0 if isinstance(beta0, SampledPrior) else FixedValue(beta0)
 		self.beta0_prior.tie(self)
@@ -209,33 +33,32 @@ class DirichletModel1WithTopics(object):
 		self.data = data
 		self.french_vocabulary = french_vocabulary
 		self.english_vocabulary = english_vocabulary
-		self.use_null = use_null
+		self.document_ids = document_ids
 		self.alignments_fixed = False
-
-		if use_null:
-			self.data = [(F + [0], E) for (F, E) in self.data]
 
 		self.FV = len(french_vocabulary)
 		self.EV = len(english_vocabulary)
+		self.D = len(document_ids)
 		self.S = len(data)
 
 		self.ttable = [DirichletMultinomial(self.EV, self.beta0) for f in range(self.FV)]
 		self.topic_ttables = [[DirichletProcess(self.beta1, self.ttable[f]) for f in range(self.FV)] for k in range(self.K)]
-		self.sentence_topics = [DirichletMultinomial(self.K, self.alpha) for s in range(self.S)]
+		self.document_topics = [DirichletMultinomial(self.K, self.alpha0) for d in range(self.D)]
+		self.sentence_topics = [DirichletProcess(self.alpha1, self.document_topics[d]) for (F, E, d) in data]
 		self.topic_assignments = []
 		self.alignments = []
 
-		for s, (F, E) in enumerate(self.data):
+		for s, (F, E, d) in enumerate(self.data):
 			self.alignments.append([None for e in E])
 			self.topic_assignments.append([None for e in E])
 			for n, e in enumerate(E):
 				self.assign_topicless_alignment(s, n, F, e)
 				self.assign_topic(s, n, F, e)
 
-	alpha = property(lambda self: self.alpha_prior.x)
-	beta0 = property(lambda self: self.beta0_prior.x)
-	beta1 = property(lambda self: self.beta1_prior.x)
-
+	alpha0 = property(lambda self: self.alpha0_prior.x)
+	alpha1 = property(lambda self: self.alpha1_prior.x)
+	beta0  = property(lambda self: self.beta0_prior.x)
+	beta1  = property(lambda self: self.beta1_prior.x)
 
 	def fix_alignments(self, alignments):
 		self.alignments = alignments
@@ -289,8 +112,11 @@ class DirichletModel1WithTopics(object):
 
 	def iterate(self, i):
 		if i % 10 == 0:	
-			self.alpha_prior.resample(10)
-			print >>sys.stderr, 'Alpha is now %f' % self.alpha
+			self.alpha0_prior.resample(10)
+			print >>sys.stderr, 'Alpha0 is now %f' % self.alpha0
+
+			self.alpha1_prior.resample(10)
+			print >>sys.stderr, 'Alpha1 is now %f' % self.alpha1
 	
 			self.beta0_prior.resample(10)
 			print >>sys.stderr, 'Beta0 is now %f' % self.beta0
@@ -298,7 +124,7 @@ class DirichletModel1WithTopics(object):
 			self.beta1_prior.resample(10)
 			print >>sys.stderr, 'Beta1 is now %f' % self.beta1
 
-		for s, (F, E) in enumerate(self.data):
+		for s, (F, E, d) in enumerate(self.data):
 			for n, e in enumerate(E):
 				if not self.alignments_fixed:
 					self.remove_alignment(s, n, F, e)	
@@ -307,7 +133,7 @@ class DirichletModel1WithTopics(object):
 				self.assign_topic(s, n, F, e)
 
 	def output(self):
-		for s, (F, E) in enumerate(self.data):
+		for s, (F, E, d) in enumerate(self.data):
 			alignment = []
 			topics = []
 			for n, e in enumerate(E):
@@ -323,14 +149,15 @@ class DirichletModel1WithTopics(object):
 
 			for n, e in enumerate(E):
 				a = alignment[n]
-				print '%d-%d' % (a, n),
+				if F[a] != 0:
+					print '%d-%d' % (a, n),
 			print
 
 	def log_likelihood(self):
 		log_likelihood = 0.0	
 
 		S = len(self.data)
-		for s, (F, E) in enumerate(self.data):	
+		for s, (F, E, d) in enumerate(self.data):	
 			for n, e in enumerate(E):
 				z = self.topic_assignments[s][n]
 				a = self.alignments[s][n]
@@ -351,54 +178,43 @@ class DirichletModel1WithTopics(object):
 
 	def perplexity(self):
 		log_likelihood = self.log_likelihood()
-		word_count = sum(len(E) for (F, E) in data)
+		word_count = sum(len(E) for (F, E, d) in data)
 		return math.exp(-log_likelihood / word_count)
 
 	def get_parameters(self):
-		return (self.alpha, self.beta0, self.beta1)
-
-def draw_from_multinomial(probabilities):
-	prob_sum = sum(probabilities)
-	probabilities = [p / prob_sum for p in probabilities]
-	return numpy.random.multinomial(1, probabilities).argmax()
-
-def dirichlet_log_prob(X, a):
-	k = len(X)
-	P = sum([(a - 1) * math.log(x) for x in X])
-	B = k * scipy.special.gammaln(a) - scipy.special.gammaln(k * a)
-	return P - B
-
-def dp_log_prob(dp, base, alpha):
-	log_prob = 0.0
-
-	customers_by_dish = Counter()
-	N = 0
-
-	for dish, tables in dp.tables_by_dish.iteritems():
-		for table_index, customer_count in enumerate(tables):
-			for person_index in range(customer_count):
-				log_prob += math.log(alpha * base.probability(dish) + customers_by_dish[dish]) - math.log(alpha + N)
-				customers_by_dish[dish] += 1
-				N += 1
-
-	return log_prob	
+		return (self.alpha0, self.alpha1, self.beta0, self.beta1)
 
 def load_data(filename, use_null):
 	data = []
-	french_vocabulary = Vocabulary(use_null)
+	french_vocabulary = Vocabulary()
 	english_vocabulary = Vocabulary()
+	document_ids = Vocabulary()
 
 	stream = open(filename)
 	line = stream.readline()
+	useDocumentIds = len(line.split('|||')) == 3
+	sentence_number = 1
 	while line:
-		f, e = [part.split() for part in line.split('|||')]
-		f = [french_vocabulary.getId(w) for w in f if len(w) != 0]
-		e = [english_vocabulary.getId(w) for w in e if len(w) != 0]
-		data.append((f, e))
+		parts = [part.strip() for part in line.split('|||')]
+		if not useDocumentIds:
+			document_id = document_ids.getId('sentence_%d' % sentence_number)
+		elif len(parts) == 3:
+			document_id = document_ids.getId(parts[0])
+			parts = parts[1:]
+
+		F, E = [part.split() for part in parts]
+		F = [french_vocabulary.getId(w) for w in F if len(w) != 0]
+		E = [english_vocabulary.getId(w) for w in E if len(w) != 0]
+
+		if use_null:
+			F += [0]
+
+		data.append(ParallelSentence(F, E, document_id))
 		line = stream.readline()
+		sentence_number += 1
 	
 	stream.close()
-	return data, french_vocabulary, english_vocabulary
+	return data, french_vocabulary, english_vocabulary, document_ids
 
 def load_sentence_alignment(stream, F, E):
 	line = stream.readline().strip()
@@ -408,9 +224,7 @@ def load_sentence_alignment(stream, F, E):
 		s = int(link[0])
 		t = int(link[1])
 		link_dict[t] = s
-
 	return [link_dict[n] if n in link_dict else len(F) for n in range(len(E))]
-		
 
 def load_alignment(filename, data):
 	stream = open(filename)
@@ -439,7 +253,8 @@ if __name__ == "__main__":
 	parser.add_argument('output_dir')
 	parser.add_argument('--num_iterations', type=int, default=100)
 	parser.add_argument('--num_topics', type=int, default=3)
-	parser.add_argument('--alpha', type=float, default=0.1)
+	parser.add_argument('--alpha0', type=float, default=0.1)
+	parser.add_argument('--alpha1', type=float, default=1.0)
 	parser.add_argument('--beta0', type=float, default=0.002)
 	parser.add_argument('--beta1', type=float, default=1.0)
 	parser.add_argument('--aligns')
@@ -451,10 +266,10 @@ if __name__ == "__main__":
 		os.makedirs(args.output_dir)
 
 	print >>sys.stderr, 'Loading data...'
-	data, french_vocabulary, english_vocabulary = load_data(args.corpus, allow_null)
+	data, french_vocabulary, english_vocabulary, document_ids = load_data(args.corpus, allow_null)
 
 	print >>sys.stderr, 'Initializing model...'
-	model = DirichletModel1WithTopics(args.num_topics, args.alpha, args.beta0, args.beta1, data, french_vocabulary, english_vocabulary, allow_null)
+	model = DirichletModel1WithTopics(args.num_topics, args.alpha0, args.alpha1, args.beta0, args.beta1, data, french_vocabulary, english_vocabulary, document_ids)
 	#model = DirichletModel1WithTopics(args.num_topics, GammaPrior(1.0, 1.0, args.alpha), GammaPrior(1.0, 1.0, args.beta0), GammaPrior(1.0, 1.0, args.beta1), data, french_vocabulary, english_vocabulary, allow_null)
 
 	if args.aligns != None:
