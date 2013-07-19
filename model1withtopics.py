@@ -45,12 +45,18 @@ class DirichletModel1WithTopics(object):
 		self.topic_ttables = [[DirichletProcess(self.beta1, self.ttable[f]) for f in range(self.FV)] for k in range(self.K)]
 		self.document_topics = [DirichletMultinomial(self.K, self.alpha0) for d in range(self.D)]
 		self.sentence_topics = [DirichletProcess(self.alpha1, self.document_topics[d]) for (F, E, d) in data]
+		#self.sentence_topics = [DirichletMultinomial(self.K, self.alpha1) for (F, E, d) in data]
+		self.topical_probs = [DirichletMultinomial(2, 0.5) for f in range(self.FV)]
+		self.is_topical = []
 		self.topic_assignments = []
 		self.alignments = []
 
 		for s, (F, E, d) in enumerate(self.data):
 			self.alignments.append([None for e in E])
 			self.topic_assignments.append([None for e in E])
+			self.is_topical.append([None for e in E])
+			for m, f in enumerate(F):
+				self.assign_topical(s, m, F)
 			for n, e in enumerate(E):
 				self.assign_topicless_alignment(s, n, F, e)
 				self.assign_topic(s, n, F, e)
@@ -74,41 +80,68 @@ class DirichletModel1WithTopics(object):
 
 	def draw_alignment(self, s, n, F, e):
 		z = self.topic_assignments[s][n]
-		probabilities = [self.topic_ttables[z][f].probability(e) for f in F]
+		ttable = self.topic_ttables[z] if z != None else self.ttable
+		probabilities = [ttable[f].probability(e) for f in F]
 		return draw_from_multinomial(probabilities)
 		
 	def assign_alignment(self, s, n, F, e):
 		z = self.topic_assignments[s][n]
 		a = self.draw_alignment(s, n, F, e)
-		self.alignments[s][n] = a	
-		self.topic_ttables[z][F[a]].increment(e)
+		self.alignments[s][n] = a
+		ttable = self.topic_ttables[z] if z != None else self.ttable
+		ttable[F[a]].increment(e)
 
 	def remove_alignment(self, s, n, F, e):
 		a = self.alignments[s][n]
 		z = self.topic_assignments[s][n]
-		self.topic_ttables[z][F[a]].decrement(e)
+		ttable = self.topic_ttables[z] if z != None else self.ttable
+		ttable[F[a]].decrement(e)
+
+	def draw_topical(self, s, m, F):
+		#return 1
+		f = F[m]
+		probabilities = [self.topical_probs[f].probability(t) for t in [0, 1]]	
+		return draw_from_multinomial(probabilities)
+
+	def assign_topical(self, s, m, F):
+		f = F[m]
+		t = self.draw_topical(s, m, F)
+		self.is_topical[s][m] = t	
+		self.topical_probs[f].increment(t)
+
+	def remove_topical(self, s, m, F):
+		f = F[m]
+		t = self.is_topical[s][m]
+		assert self.topical_probs[f].counts[t] >= 1
+		self.topical_probs[f].decrement(t)
 
 	def draw_topic_assignment(self, s, n, F, e):
 		a = self.alignments[s][n]
 		f = F[a]
+		t = self.is_topical[s][a]
+		if t == 0:
+			return None
 		probabilities = [self.sentence_topics[s].probability(z) * \
 				 self.topic_ttables[z][f].probability(e) \
 				 for z in range(self.K)]
-
 		return draw_from_multinomial(probabilities)
 
 	def assign_topic(self, s, n, F, e):
 		a = self.alignments[s][n]
 		z = self.draw_topic_assignment(s, n, F, e)
 		self.topic_assignments[s][n] = z
-		self.topic_ttables[z][F[a]].increment(e)
-		self.sentence_topics[s].increment(z)
+		ttable = self.topic_ttables[z] if z != None else self.ttable
+		ttable[F[a]].increment(e)
+		if z != None:
+			self.sentence_topics[s].increment(z)
 
 	def remove_topic_assignment(self, s, n, F, e):
 		a = self.alignments[s][n]
 		z = self.topic_assignments[s][n]
-		self.topic_ttables[z][F[a]].decrement(e)
-		self.sentence_topics[s].decrement(z)
+		ttable = self.topic_ttables[z] if z != None else self.ttable
+		ttable[F[a]].decrement(e)
+		if z != None:
+			self.sentence_topics[s].decrement(z)
 
 	def iterate(self, i):
 		if i % 10 == 0:	
@@ -125,6 +158,10 @@ class DirichletModel1WithTopics(object):
 			print >>sys.stderr, 'Beta1 is now %f' % self.beta1
 
 		for s, (F, E, d) in enumerate(self.data):
+			for m, f in enumerate(F):
+				self.remove_topical(s, m, F)
+				self.assign_topical(s, m, F)
+
 			for n, e in enumerate(E):
 				if not self.alignments_fixed:
 					self.remove_alignment(s, n, F, e)	
@@ -163,8 +200,10 @@ class DirichletModel1WithTopics(object):
 				a = self.alignments[s][n]
 				f = F[a]
 
-				log_likelihood += math.log(self.topic_ttables[z][f].probability(e))
-				log_likelihood += math.log(self.sentence_topics[s].probability(z))
+				ttable = self.topic_ttables[z] if z != None else self.ttable
+				log_likelihood += math.log(ttable[f].probability(e))
+				if z != None:
+					log_likelihood += math.log(self.sentence_topics[s].probability(z))
 			#log_likelihood += dirichlet_log_prob([self.sentence_topics[s].probability(k) for k in range(self.K)], self.alpha)
 
 		for f in range(self.FV):
@@ -254,9 +293,9 @@ if __name__ == "__main__":
 	parser.add_argument('--num_iterations', type=int, default=100)
 	parser.add_argument('--num_topics', type=int, default=3)
 	parser.add_argument('--alpha0', type=float, default=0.1)
-	parser.add_argument('--alpha1', type=float, default=1.0)
+	parser.add_argument('--alpha1', type=float, default=0.1)
 	parser.add_argument('--beta0', type=float, default=0.002)
-	parser.add_argument('--beta1', type=float, default=1.0)
+	parser.add_argument('--beta1', type=float, default=0.00001)
 	parser.add_argument('--aligns')
 	parser.add_argument('--nonull', action='store_true')
 	args = parser.parse_args()
