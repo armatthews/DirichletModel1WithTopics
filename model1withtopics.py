@@ -52,8 +52,12 @@ class DirichletModel1WithTopics(object):
 			self.alignments.append([None for e in E])
 			self.topic_assignments.append([None for e in E])
 			for n, e in enumerate(E):
-				self.assign_topicless_alignment(s, n, F, e)
-				self.assign_topic(s, n, F, e)
+				self.alignments[s][n] = numpy.random.randint(0, len(F))
+				self.topic_assignments[s][n] = numpy.random.randint(0, self.K)
+				self.topic_ttables[self.topic_assignments[s][n]][F[self.alignments[s][n]]].increment(e)
+				self.sentence_topics[s].increment(self.topic_assignments[s][n])
+				#self.assign_topicless_alignment(s, n, F, e)
+				#self.assign_topic(s, n, F, e)
 
 	alpha0 = property(lambda self: self.alpha0_prior.x)
 	alpha1 = property(lambda self: self.alpha1_prior.x)
@@ -184,11 +188,8 @@ class DirichletModel1WithTopics(object):
 	def get_parameters(self):
 		return (self.alpha0, self.alpha1, self.beta0, self.beta1)
 
-def load_data(filename, use_null):
+def load_data(filename, use_null, french_vocabulary=Vocabulary(), english_vocabulary=Vocabulary(), document_ids=Vocabulary()):
 	data = []
-	french_vocabulary = Vocabulary()
-	english_vocabulary = Vocabulary()
-	document_ids = Vocabulary()
 
 	stream = open(filename)
 	line = stream.readline()
@@ -252,11 +253,11 @@ if __name__ == "__main__":
 	parser.add_argument('corpus')
 	parser.add_argument('output_dir')
 	parser.add_argument('--num_iterations', type=int, default=100)
-	parser.add_argument('--num_topics', type=int, default=3)
+	parser.add_argument('--num_topics', type=int, default=2)
 	parser.add_argument('--alpha0', type=float, default=0.1)
-	parser.add_argument('--alpha1', type=float, default=1.0)
-	parser.add_argument('--beta0', type=float, default=0.002)
-	parser.add_argument('--beta1', type=float, default=1.0)
+	parser.add_argument('--alpha1', type=float, default=0.9)
+	parser.add_argument('--beta0', type=float, default=0.0026)
+	parser.add_argument('--beta1', type=float, default=0.1)
 	parser.add_argument('--aligns')
 	parser.add_argument('--nonull', action='store_true')
 	args = parser.parse_args()
