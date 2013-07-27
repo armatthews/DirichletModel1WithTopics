@@ -54,7 +54,7 @@ class DirichletModel1WithTopics(object):
 		for s, (F, E, d) in enumerate(self.data):
 			self.alignments.append([None for e in E])
 			self.topic_assignments.append([None for e in E])
-			self.is_topical.append([None for e in E])
+			self.is_topical.append([None for f in F])
 			for m, f in enumerate(F):
 				self.assign_topical(s, m, F)
 			for n, e in enumerate(E):
@@ -102,7 +102,7 @@ class DirichletModel1WithTopics(object):
 		ttable[F[a]].decrement(e)
 
 	def draw_topical(self, s, m, F):
-		#return 1
+		return 1
 		f = F[m]
 		probabilities = [self.topical_probs[f].probability(t) for t in [0, 1]]	
 		return draw_from_multinomial(probabilities)
@@ -194,7 +194,7 @@ class DirichletModel1WithTopics(object):
 					print '%d-%d' % (a, n),
 			print
 
-	def log_likelihood(self):
+	def new_log_likelihood(self):
 		log_likelihood = 0.0
 		gammaln = scipy.special.gammaln
 		log = numpy.log
@@ -245,7 +245,7 @@ class DirichletModel1WithTopics(object):
 
 		return log_likelihood
 
-	def old_log_likelihood(self):
+	def log_likelihood(self):
 		log_likelihood = 0.0	
 
 		S = len(self.data)
@@ -345,11 +345,11 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
 	parser.add_argument('corpus')
 	parser.add_argument('output_dir')
-	parser.add_argument('--num_iterations', type=int, default=100)
+	parser.add_argument('--num_iterations', type=int, default=20)
 	parser.add_argument('--num_topics', type=int, default=2)
 	parser.add_argument('--alpha0', type=float, default=0.1)
 	parser.add_argument('--alpha1', type=float, default=0.9)
-	parser.add_argument('--beta0', type=float, default=0.0026)
+	parser.add_argument('--beta0', type=float, default=0.00026)
 	parser.add_argument('--beta1', type=float, default=0.1)
 	parser.add_argument('--aligns')
 	parser.add_argument('--nonull', action='store_true')
