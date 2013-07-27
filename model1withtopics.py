@@ -191,6 +191,57 @@ class DirichletModel1WithTopics(object):
 			print
 
 	def log_likelihood(self):
+		log_likelihood = 0.0
+		gammaln = scipy.special.gammaln
+		log = numpy.log
+		exp = numpy.exp
+		floor = math.floor
+
+		FV = len(self.french_vocabulary)
+		EV = len(self.english_vocabulary)
+		D = len(self.document_ids)
+		K = self.K
+
+		# Log likelihood of phi and phi0
+		#log_likelihood += FV * gammaln(self.beta0 * EV) - FV * EV * gammaln(self.beta0)
+		for f in range(FV):
+			for k in range(K):
+				log_likelihood += self.topic_ttables[k][f].num_tables * log(self.beta1) - gammaln(self.beta1 + self.topic_ttables[k][f].num_customers)
+				for e in range(EV):
+					log_likelihood += gammaln(len(self.topic_ttables[k][f].tables_by_dish.get(e, [])) + 1) + self.topic_ttables[k][f].customers_by_dish.get(e, 0) * log(self.topic_ttables[k][f].probability(e)) \
+						- gammaln(self.topic_ttables[k][f].num_tables + 1)
+					pass
+				for dish, tables in self.topic_ttables[k][f].tables_by_dish.iteritems():
+					for table_count in tables:
+						log_likelihood += gammaln(table_count)
+
+		# Log likelihood of theta and theta0
+		#log_likelihood += D * gammaln(self.alpha0 * K) - D * K * gammaln(self.alpha0)
+		for s, (F, E, d) in enumerate(self.data):
+			log_likelihood += self.sentence_topics[s].num_tables * log(self.alpha1) - gammaln(self.alpha1 + self.sentence_topics[s].num_customers)
+			for k in range(K):
+				log_likelihood += gammaln(len(self.sentence_topics[s].tables_by_dish.get(k, [])) + 1) + self.sentence_topics[s].customers_by_dish.get(k, 0) * log(self.sentence_topics[s].probability(k)) \
+					- gammaln(self.sentence_topics[s].num_tables + 1)
+			for dish, tables in self.sentence_topics[s].tables_by_dish.iteritems():
+				for table_count in tables:
+					log_likelihood += gammaln(table_count)
+
+		# Log likelihood of alignment links
+		for s, (F, E, d) in enumerate(self.data):
+			for n, e in enumerate(E):
+				z = self.topic_assignments[s][n]
+				a = self.alignments[s][n]
+				f = F[a]
+				log_likelihood += -log(len(F))
+				# Should the below four line even be here?!
+				ttable = self.topic_ttables[z] if z != None else self.ttable
+				log_likelihood += numpy.log(ttable[f].probability(e))
+				if z != None:
+					log_likelihood += numpy.log(self.sentence_topics[s].probability(z))
+
+		return log_likelihood
+
+	def old_log_likelihood(self):
 		log_likelihood = 0.0	
 
 		S = len(self.data)
@@ -201,9 +252,9 @@ class DirichletModel1WithTopics(object):
 				f = F[a]
 
 				ttable = self.topic_ttables[z] if z != None else self.ttable
-				log_likelihood += math.log(ttable[f].probability(e))
+				log_likelihood += numpy.log(ttable[f].probability(e))
 				if z != None:
-					log_likelihood += math.log(self.sentence_topics[s].probability(z))
+					log_likelihood += numpy.log(self.sentence_topics[s].probability(z))
 			#log_likelihood += dirichlet_log_prob([self.sentence_topics[s].probability(k) for k in range(self.K)], self.alpha)
 
 		for f in range(self.FV):
