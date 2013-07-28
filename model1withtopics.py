@@ -6,7 +6,7 @@ import os
 import cPickle as pickle
 from vocabulary import Vocabulary
 from probability import DirichletMultinomial, DirichletProcess, draw_from_multinomial
-from prior import SampledPrior, GammaPrior, FixedValue
+from prior import SampledPrior, GammaPrior, FixedValue, BetaPrior
 from nltk.tokenize import sent_tokenize, word_tokenize
 from collections import defaultdict, Counter, namedtuple
 import math
@@ -30,11 +30,19 @@ class DirichletModel1WithTopics(object):
 		self.beta1_prior = beta1 if isinstance(beta1, SampledPrior) else FixedValue(beta1)
 		self.beta1_prior.tie(self)
 
+		self.tension_prior = GammaPrior(8.0, 1.0, 8.0)
+		self.tension_prior.tie(self)
+
+		self.p0_prior = BetaPrior(1.0, 99.0, 0.01)
+		self.p0_prior.tie(self)
+
+		self.use_alignment_prior = False
+
 		self.data = data
 		self.french_vocabulary = french_vocabulary
 		self.english_vocabulary = english_vocabulary
 		self.document_ids = document_ids
-		self.alignments_fixed = False
+		self.alignments_fixed = True
 
 		self.FV = len(french_vocabulary)
 		self.EV = len(english_vocabulary)
@@ -62,35 +70,39 @@ class DirichletModel1WithTopics(object):
 				self.topic_assignments[s][n] = numpy.random.randint(0, self.K)
 				self.topic_ttables[self.topic_assignments[s][n]][F[self.alignments[s][n]]].increment(e)
 				self.sentence_topics[s].increment(self.topic_assignments[s][n])
-				#self.assign_topicless_alignment(s, n, F, e)
-				#self.assign_topic(s, n, F, e)
 
 	alpha0 = property(lambda self: self.alpha0_prior.x)
 	alpha1 = property(lambda self: self.alpha1_prior.x)
-	beta0  = property(lambda self: self.beta0_prior.x)
-	beta1  = property(lambda self: self.beta1_prior.x)
+	beta0 = property(lambda self: self.beta0_prior.x)
+	beta1 = property(lambda self: self.beta1_prior.x)
+	tension  = property(lambda self: self.tension_prior.x)
+	p0  = property(lambda self: self.p0_prior.x)
 
 	def fix_alignments(self, alignments):
 		self.alignments = alignments
 		self.alignments_fixed = True
 
-	def draw_topicless_alignment(self, s, n, F, e):
-		probabilities = [self.ttable[f].probability(e) for f in F]
-		return draw_from_multinomial(probabilities)
-
-	def assign_topicless_alignment(self, s, n, F, e):
-		a = self.draw_topicless_alignment(s, n, F, e)
-		self.alignments[s][n] = a
-
-	def draw_alignment(self, s, n, F, e):
+	def draw_alignment(self, s, n, F, E):
+		e = E[n]
 		z = self.topic_assignments[s][n]
 		ttable = self.topic_ttables[z] if z != None else self.ttable
-		probabilities = [ttable[f].probability(e) for f in F]
+		if self.use_alignment_prior:
+			probabilities = []
+			for a, f in enumerate(F):
+				if f == 0:
+					alignment_prob = self.p0
+				else:
+					alignment_prob = (1.0 - self.p0) * numpy.exp(-self.tension * numpy.abs(1.0 * a / len(F) - 1.0 * n / len(E)))
+				translation_prob = self.ttable[f].probability(e)
+				probabilities.append(alignment_prob * translation_prob)
+		else:
+			probabilities = [ttable[f].probability(e) for f in F]
 		return draw_from_multinomial(probabilities)
 		
-	def assign_alignment(self, s, n, F, e):
+	def assign_alignment(self, s, n, F, E):
+		e = E[n]
 		z = self.topic_assignments[s][n]
-		a = self.draw_alignment(s, n, F, e)
+		a = self.draw_alignment(s, n, F, E)
 		self.alignments[s][n] = a
 		ttable = self.topic_ttables[z] if z != None else self.ttable
 		ttable[F[a]].increment(e)
@@ -161,6 +173,13 @@ class DirichletModel1WithTopics(object):
 			self.beta1_prior.resample(10)
 			print >>sys.stderr, 'Beta1 is now %f' % self.beta1
 
+			if self.use_alignment_prior:
+				self.tension_prior.resample(10)
+				print >>sys.stderr, 'Tension is now %f' % self.tension
+
+				self.p0_prior.resample(10)
+				print >>sys.stderr, 'P0 is now %f' % self.p0
+
 		for s, (F, E, d) in enumerate(self.data):
 			for m, f in enumerate(F):
 				self.remove_topical(s, m, F)
@@ -169,7 +188,7 @@ class DirichletModel1WithTopics(object):
 			for n, e in enumerate(E):
 				if not self.alignments_fixed:
 					self.remove_alignment(s, n, F, e)	
-					self.assign_alignment(s, n, F, e)
+					self.assign_alignment(s, n, F, E)
 				self.remove_topic_assignment(s, n, F, e)
 				self.assign_topic(s, n, F, e)
 
@@ -194,7 +213,17 @@ class DirichletModel1WithTopics(object):
 					print '%d-%d' % (a, n),
 			print
 
-	def new_log_likelihood(self):
+	def log_likelihood(self):
+		def series_sum(l, g, r):
+			"""Sum of the first l terms of a geometric series with ratio r, starting at g"""
+			return g * (1.0 - r ** l) / (1.0 - r)
+
+		def h(i, j, m, n):
+			return -abs(1.0 * i / m - 1.0 * j / n)
+
+		def delta(i, j, m, n):
+			return exp(self.tension * h(i, j, m, n))
+
 		log_likelihood = 0.0
 		gammaln = scipy.special.gammaln
 		log = numpy.log
@@ -211,13 +240,19 @@ class DirichletModel1WithTopics(object):
 		for f in range(FV):
 			for k in range(K):
 				log_likelihood += self.topic_ttables[k][f].num_tables * log(self.beta1) - gammaln(self.beta1 + self.topic_ttables[k][f].num_customers)
-				for e in range(EV):
-					log_likelihood += gammaln(len(self.topic_ttables[k][f].tables_by_dish.get(e, [])) + 1) + self.topic_ttables[k][f].customers_by_dish.get(e, 0) * log(self.topic_ttables[k][f].probability(e)) \
-						- gammaln(self.topic_ttables[k][f].num_tables + 1)
-					pass
-				for dish, tables in self.topic_ttables[k][f].tables_by_dish.iteritems():
+
+				total_num_tables = 0
+				for dish, tables in self.topic_ttables[k][f].tables_by_dish.iteritems(): # dish = e
+					num_customers = self.topic_ttables[k][f].customers_by_dish[dish]
+					num_tables = len(tables)
+					log_likelihood += num_customers * log(self.topic_ttables[k][f].probability(dish))
+					log_likelihood += gammaln(num_tables)
+					total_num_tables += num_tables
+
 					for table_count in tables:
 						log_likelihood += gammaln(table_count)
+
+				log_likelihood -= gammaln(total_num_tables + 1)
 
 		# Log likelihood of theta and theta0
 		#log_likelihood += D * gammaln(self.alpha0 * K) - D * K * gammaln(self.alpha0)
@@ -232,20 +267,25 @@ class DirichletModel1WithTopics(object):
 
 		# Log likelihood of alignment links
 		for s, (F, E, d) in enumerate(self.data):
+			lf = len([f for f in F if f != 0])
 			for n, e in enumerate(E):
 				z = self.topic_assignments[s][n]
 				a = self.alignments[s][n]
 				f = F[a]
-				log_likelihood += -log(len(F))
-				# Should the below four line even be here?!
-				ttable = self.topic_ttables[z] if z != None else self.ttable
-				log_likelihood += numpy.log(ttable[f].probability(e))
-				if z != None:
-					log_likelihood += numpy.log(self.sentence_topics[s].probability(z))
+				if self.use_alignment_prior:
+					r = exp(-1.0 * self.tension / lf)
+					j_up = floor(1.0 * n * lf / len(E))
+					j_down = j_up + 1.0
+					Z = series_sum(j_up + 1, delta(n + 1, j_up + 1, len(E), lf), r) \
+						+ series_sum(lf - j_down, delta(n + 1, j_down + 1, len(E), lf), r)
+					alignment_prob = (1.0 - self.p0) * delta(n + 1, a + 1, len(E), lf) / Z if f != 0 else self.p0
+					log_likelihood += log(alignment_prob)
+				else:
+					log_likelihood += -log(len(F))
 
 		return log_likelihood
 
-	def log_likelihood(self):
+	def old_log_likelihood(self):
 		log_likelihood = 0.0	
 
 		S = len(self.data)
@@ -363,8 +403,8 @@ if __name__ == "__main__":
 	data, french_vocabulary, english_vocabulary, document_ids = load_data(args.corpus, allow_null)
 
 	print >>sys.stderr, 'Initializing model...'
-	model = DirichletModel1WithTopics(args.num_topics, args.alpha0, args.alpha1, args.beta0, args.beta1, data, french_vocabulary, english_vocabulary, document_ids)
-	#model = DirichletModel1WithTopics(args.num_topics, GammaPrior(1.0, 1.0, args.alpha), GammaPrior(1.0, 1.0, args.beta0), GammaPrior(1.0, 1.0, args.beta1), data, french_vocabulary, english_vocabulary, allow_null)
+	model = DirichletModel1WithTopics(args.num_topics, GammaPrior(1.0, 1.0, args.alpha0), GammaPrior(1.0, 1.0, args.alpha1), GammaPrior(1.0, 1.0, args.beta0), GammaPrior(1.0, 1.0, args.beta1), \
+						data, french_vocabulary, english_vocabulary, document_ids)
 
 	if args.aligns != None:
 		print >>sys.stderr, 'Loading gold alignments...'
