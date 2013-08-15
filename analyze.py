@@ -53,25 +53,33 @@ if max_a_posteriori:
 			a = model.alignments[s][n]
 			z = model.topic_assignments[s][n]
 			f = F[a]
-			model.topic_ttables[z][f].decrement(e)
-			model.sentence_topics[s].decrement(z)
+			if z != None:
+				model.topic_ttables[z][f].decrement(e)
+				model.sentence_topics[s].decrement(z)
+			else:
+				model.ttable[f].decrement(e)
 
-			best_p = model.topic_ttables[z][f].probability(e)
+			best_p = model.topic_ttables[z][f].probability(e) if z != None else model.ttable[f].probability(e)
+			best_p *= model.topical_probs[f].probability(1 if z != None else 0)
 			best_za = (z, a)
 			old_za = (z, a)
-			for z in range(model.K):
+			for z in range(model.K) + [None]:
 				for a, f in enumerate(F):
-					p = model.topic_ttables[z][f].probability(e)
+					ttable = model.topic_ttables[z] if z != None else model.ttable
+					p = ttable[f].probability(e) * model.topical_probs[f].probability(1 if z != None else 0)
 					if best_p == None or p > best_p:
 						best_p = p
 						best_za = (z, a)
 			if best_za != old_za:
 				changes += 1
-				print >>sys.stderr, 'Changed sentence %d word %d (%s)\'s alignment and topic from (%s, %d) to (%s, %d)' % (s, n, english_vocabulary.getWord(e), french_vocabulary.getWord(F[old_za[1]]), old_za[0], french_vocabulary.getWord(F[best_za[1]]), best_za[0])
+				print >>sys.stderr, 'Changed sentence %d word %d (%s)\'s alignment and topic from (%s, %s) to (%s, %s)' % (s, n, english_vocabulary.getWord(e), french_vocabulary.getWord(F[old_za[1]]), str(old_za[0]), french_vocabulary.getWord(F[best_za[1]]), str(best_za[0]))
 			z, a = best_za
 			f = F[a]
-			model.topic_ttables[z][f].increment(e)
-			model.sentence_topics[s].increment(z)
+			if z != None:
+				model.topic_ttables[z][f].increment(e)
+				model.sentence_topics[s].increment(z)
+			else:
+				model.ttable[f].increment(e)
 			model.alignments[s][n] = a
 			model.topic_assignments[s][n] = z
 	print >>sys.stderr, changes, 'values changed from last iteration to MAP'
