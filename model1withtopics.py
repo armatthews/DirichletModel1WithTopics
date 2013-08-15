@@ -36,13 +36,13 @@ class DirichletModel1WithTopics(object):
 		self.p0_prior = BetaPrior(1.0, 99.0, 0.01)
 		self.p0_prior.tie(self)
 
-		self.use_alignment_prior = False
+		self.use_alignment_prior = True
 
 		self.data = data
 		self.french_vocabulary = french_vocabulary
 		self.english_vocabulary = english_vocabulary
 		self.document_ids = document_ids
-		self.alignments_fixed = True
+		self.alignments_fixed = False
 
 		self.FV = len(french_vocabulary)
 		self.EV = len(english_vocabulary)
@@ -54,7 +54,7 @@ class DirichletModel1WithTopics(object):
 		self.document_topics = [DirichletMultinomial(self.K, self.alpha0) for d in range(self.D)]
 		self.sentence_topics = [DirichletProcess(self.alpha1, self.document_topics[d]) for (F, E, d) in data]
 		#self.sentence_topics = [DirichletMultinomial(self.K, self.alpha1) for (F, E, d) in data]
-		self.topical_probs = [DirichletMultinomial(2, 0.5) for f in range(self.FV)]
+		self.topical_probs = [DirichletMultinomial(2, 0.000001) for f in range(self.FV)]
 		self.is_topical = []
 		self.topic_assignments = []
 		self.alignments = []
@@ -66,10 +66,19 @@ class DirichletModel1WithTopics(object):
 			for m, f in enumerate(F):
 				self.assign_topical(s, m, F)
 			for n, e in enumerate(E):
-				self.alignments[s][n] = numpy.random.randint(0, len(F))
-				self.topic_assignments[s][n] = numpy.random.randint(0, self.K)
-				self.topic_ttables[self.topic_assignments[s][n]][F[self.alignments[s][n]]].increment(e)
-				self.sentence_topics[s].increment(self.topic_assignments[s][n])
+				a = numpy.random.randint(0, len(F))
+				f = F[a]
+				t = self.is_topical[s][a]
+
+				self.alignments[s][n] = a
+				if t == 1:
+					z = numpy.random.randint(0, self.K)
+					self.topic_assignments[s][n] = z
+					self.topic_ttables[z][f].increment(e)
+					self.sentence_topics[s].increment(z)
+				else:
+					self.topic_assignments[s][n] = None
+					self.ttable[f].increment(e)
 
 	alpha0 = property(lambda self: self.alpha0_prior.x)
 	alpha1 = property(lambda self: self.alpha1_prior.x)
@@ -113,8 +122,7 @@ class DirichletModel1WithTopics(object):
 		ttable = self.topic_ttables[z] if z != None else self.ttable
 		ttable[F[a]].decrement(e)
 
-	def draw_topical(self, s, m, F):
-		return 1
+	def draw_topical(self, s, m, F):	
 		f = F[m]
 		probabilities = [self.topical_probs[f].probability(t) for t in [0, 1]]	
 		return draw_from_multinomial(probabilities)
@@ -160,24 +168,25 @@ class DirichletModel1WithTopics(object):
 			self.sentence_topics[s].decrement(z)
 
 	def iterate(self, i):
-		if i % 10 == 0:	
-			self.alpha0_prior.resample(10)
+		if i % 1 == 0:
+			resample_attempts = 5
+			self.alpha0_prior.resample(resample_attempts)
 			print >>sys.stderr, 'Alpha0 is now %f' % self.alpha0
 
-			self.alpha1_prior.resample(10)
+			self.alpha1_prior.resample(resample_attempts)
 			print >>sys.stderr, 'Alpha1 is now %f' % self.alpha1
 	
-			self.beta0_prior.resample(10)
+			self.beta0_prior.resample(resample_attempts)
 			print >>sys.stderr, 'Beta0 is now %f' % self.beta0
 
-			self.beta1_prior.resample(10)
+			self.beta1_prior.resample(resample_attempts)
 			print >>sys.stderr, 'Beta1 is now %f' % self.beta1
 
 			if self.use_alignment_prior:
-				self.tension_prior.resample(10)
+				self.tension_prior.resample(resample_attempts)
 				print >>sys.stderr, 'Tension is now %f' % self.tension
 
-				self.p0_prior.resample(10)
+				self.p0_prior.resample(resample_attempts)
 				print >>sys.stderr, 'P0 is now %f' % self.p0
 
 		for s, (F, E, d) in enumerate(self.data):
@@ -198,9 +207,10 @@ class DirichletModel1WithTopics(object):
 			topics = []
 			for n, e in enumerate(E):
 				best = (0.0, None, None)
-				for z in range(self.K):
+				for z in range(self.K) + [None]:
 					for a, f in enumerate(F):
-						p = self.topic_ttables[z][f].probability(e)
+						ttable = self.topic_ttables[z] if z != None else self.ttable
+						p = ttable[f].probability(e)
 						if p > best[0]:
 							best = (p, z, a)
 				p, z, a = best
