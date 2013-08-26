@@ -1,3 +1,4 @@
+import numpypy
 import numpy
 import scipy
 import sys
@@ -88,6 +89,15 @@ class DirichletModel1WithTopics(object):
 	p0  = property(lambda self: self.p0_prior.x)
 
 	def fix_alignments(self, alignments):
+		for s, (F, E, d) in enumerate(self.data):
+			for n, e in enumerate(E):
+				z = self.topic_assignments[s][n]
+				a_old = self.alignments[s][n]
+				a_new = alignments[s][n]
+				ttable = self.topic_ttables[z] if z != None else self.ttable
+				ttable[F[a_old]].decrement(e)
+				ttable[F[a_new]].increment(e)
+
 		self.alignments = alignments
 		self.alignments_fixed = True
 
@@ -368,13 +378,16 @@ def load_sentence_alignment(stream, F, E):
 		s = int(link[0])
 		t = int(link[1])
 		link_dict[t] = s
-	return [link_dict[n] if n in link_dict else len(F) for n in range(len(E))]
+	assert F[-1] == 0
+	return [link_dict[n] if n in link_dict else len(F) - 1 for n in range(len(E))]
 
 def load_alignment(filename, data):
 	stream = open(filename)
 	alignments = []
-	for s, (F, E) in enumerate(data):
+	for s, (F, E, d) in enumerate(data):
 		alignment = load_sentence_alignment(stream, F, E)
+		for link in alignment:
+			assert link >= 0 and link <= len(F)
 		alignments.append(alignment)
 	stream.close()
 	return alignments
@@ -418,7 +431,7 @@ if __name__ == "__main__":
 
 	if args.aligns != None:
 		print >>sys.stderr, 'Loading gold alignments...'
-		gold_alignment = load_alignment(args.align, data)
+		gold_alignment = load_alignment(args.aligns, data)
 		model.fix_alignments(gold_alignment)
 
 	output_iteration(0, model, args.output_dir)
