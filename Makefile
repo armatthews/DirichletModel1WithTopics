@@ -1,2 +1,2 @@
 dm1wt: dm1wt.cc
-	g++ -std=c++11 -Wall -I/home/austinma/git/cpyp/ dm1wt.cc -o dm1wt
+	g++ -std=c++11 -Wall -I/home/austinma/git/cpyp/ dm1wt.cc -o dm1wt -lboost_program_options-mt -lboost_serialization

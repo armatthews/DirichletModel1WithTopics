@@ -1,6 +1,9 @@
 #include <iostream>
+#include <fstream>
 #include <unordered_map>
 #include <cstdlib>
+#include "boost/archive/text_oarchive.hpp"
+#include "boost/program_options.hpp"
 
 #include "corpus/corpus.h"
 #include "cpyp/m.h"
@@ -11,31 +14,55 @@
 
 using namespace std;
 using namespace cpyp;
+namespace po=boost::program_options;
 
-double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& p, 
+double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& underlying_ttable_params, 
+                      const tied_parameter_resampler<crp<unsigned>>& topical_ttable_params,
+                      const tied_parameter_resampler<crp<unsigned>>& document_topic_params,
+                      const tied_parameter_resampler<crp<unsigned>>& sentence_topic_params,
                       const diagonal_alignment_prior& ap,
                       const vector<vector<unsigned>>& src_corpus,
                       const vector<crp<unsigned>>& underlying_ttable,
-                      const vector<vector<unsigned short>>& alignments) {
-  double llh = p.log_likelihood();
+                      const vector<vector<crp<unsigned>>>& topical_ttables,
+                      const vector<crp<unsigned>>& document_topics,
+                      const vector<crp<unsigned>>& sentence_topics,
+                      const vector<vector<unsigned short>>& alignments,
+                      const vector<vector<unsigned short>>& topic_assignments) {
+  double llh = 0.0;
+  llh += underlying_ttable_params.log_likelihood();
+  llh += topical_ttable_params.log_likelihood();
+  llh += document_topic_params.log_likelihood();
+  llh += sentence_topic_params.log_likelihood();
   for (auto& crp : underlying_ttable)
     llh += crp.log_likelihood();
-  //llh += ap.log_likelihood(alignments, src_corpus);
+  for (auto& topical_ttable : topical_ttables)
+    for (auto& crp : topical_ttable)
+      llh += crp.log_likelihood();
+  for (auto& crp : document_topics)
+    llh += crp.log_likelihood();
+  for (auto& crp : sentence_topics)
+    llh += crp.log_likelihood();
+  llh += ap.log_likelihood(alignments, src_corpus);
   return llh;
 }
 
 void show_ttable(vector<crp<unsigned>>& underlying_ttable, Dict& src_dict, Dict& tgt_dict) {
+  vector<unsigned> ind(tgt_dict.max());
+  for (unsigned tgt_id = 0; tgt_id < tgt_dict.max(); tgt_id++)
+    ind[tgt_id] = tgt_id;
+
   for (unsigned src_id = 1; src_id < underlying_ttable.size(); src_id++) {
     crp<unsigned>& p = underlying_ttable[src_id];
-    vector<unsigned> ind(tgt_dict.max());
-    for (unsigned tgt_id = 0; tgt_id < tgt_dict.max(); tgt_id++)
-      ind[tgt_id] = tgt_id;
+    if (p.num_customers() == 0)
+      continue;
 
     cerr << src_dict.Convert(src_id) << "\n";
     partial_sort(ind.begin(), ind.begin() + 10, ind.end(), [&p, &tgt_dict](unsigned alignments, unsigned b) { return p.prob(alignments, 1.0 / tgt_dict.max()) > p.prob(b, 1.0 / tgt_dict.max()); });
     for (unsigned i = 0; i < 10; i++) {
       unsigned tgt_id = ind[i];
-      cerr << "\t" << tgt_dict.Convert(tgt_id) << "\t" << p.prob(tgt_id, 1.0 / tgt_dict.max()) << endl;
+      if (p.num_tables(tgt_id) > 0) {
+        cerr << "\t" << tgt_dict.Convert(tgt_id) << "\t" << p.prob(tgt_id, 1.0 / tgt_dict.max()) << endl;
+      }
     }
   }
 }
@@ -52,18 +79,36 @@ void output_alignments(vector<vector<unsigned>>& tgt_corpus, vector<vector<unsig
 }
 
 int main(int argc, char** argv) {
-  if (argc != 4) {
-    cerr << argv[0] << " <source.txt> <target.txt> <nsamples>\n\nEstimate alignments 'Pitman-Yor Model 1' model\n";
+  po::options_description options("Options");
+  options.add_options()
+    ("train_src_file,s", po::value<string>()->required(), "Source side of training corpus")
+    ("train_tgt_file,t", po::value<string>()->required(), "Target side of training corpus")
+    ("samples,n", po::value<int>()->required(), "Number of samples")
+    ("topics,k", po::value<int>(), "Number of topics")
+    ("help", "Print help messages");
+  po::variables_map args;
+  try {
+    po::store(po::parse_command_line(argc, argv, options), args);
+    if (args.count("help")) {
+       cerr << options << endl;
+       return 0;
+    }
+    po::notify(args);
+  }
+  catch (po::error& e) {
+    cerr << "ERROR: " << e.what() << endl << endl;
+    cerr << options << endl;
     return 1;
   }
+
   MT19937 eng;
-  string train_src_file = argv[1];
-  string train_tgt_file = argv[2];
+  string train_src_file = args["train_src_file"].as<string>();
+  string train_tgt_file = args["train_tgt_file"].as<string>();
   const bool use_alignment_prior = true;
   const bool use_null = true;
-  const unsigned num_topics = 1;
+  const unsigned num_topics = (args.count("topics")) ? args["topics"].as<int>() : 2;
   diagonal_alignment_prior diag_alignment_prior(4.0, 0.01, use_null);
-  const unsigned samples = atoi(argv[3]);
+  const unsigned samples = args["samples"].as<int>();
   
   Dict src_dict;
   Dict tgt_dict;
@@ -83,7 +128,8 @@ int main(int argc, char** argv) {
   assert(src_corpus.size() == tgt_corpus.size());
   // dicts contain 1 extra word, <bad>, so the values in src_corpus and tgt_corpus
   // actually run from [1, *_vocab.size()], instead of being 0-indexed.
-  cerr << "Corpus size: " << src_corpus.size() << " sentences\t (" << src_vocab.size() << "/" << tgt_vocab.size() << " word types)\n";
+  cerr << "Corpus size: " << src_corpus.size() << " sentences\t (" << src_vocab.size() << "/" << tgt_vocab.size() << " word types).\n";
+  cerr << "Number of topics: " << num_topics << "\n";
 
   vector<vector<unsigned short>> topic_assignments;
   vector<vector<unsigned short>> alignments;
@@ -155,9 +201,9 @@ int main(int argc, char** argv) {
             probs[k] *= alignment_prob;
           }
         }
-        multinomial_distribution<double> mult(probs);
+        multinomial_distribution<double> a_mult(probs);
         // random sample during the first iteration
-        a_ij = sample ? mult(eng) : static_cast<unsigned>(sample_uniform01<float>(eng) * src.size());  
+        a_ij = sample ? a_mult(eng) : static_cast<unsigned>(sample_uniform01<float>(eng) * src.size());  
         alignments[i][j] = a_ij; 
         assert(a_ij >= 0);
         assert(a_ij < src.size());
@@ -166,8 +212,8 @@ int main(int argc, char** argv) {
         for (unsigned k = 0; k < num_topics; ++k) {
           probs[k] = sentence_topics[i].prob(k, document_topics[i].prob(k, uniform_topic));
         }
-        multinomial_distribution<double> mult2(probs);
-        z_ij = sample ? mult2(eng) : static_cast<unsigned>(sample_uniform01<float>(eng) * num_topics);
+        multinomial_distribution<double> z_mult(probs);
+        z_ij = sample ? z_mult(eng) : static_cast<unsigned>(sample_uniform01<float>(eng) * num_topics);
         if (z_ij < 0 || z_ij >= num_topics)
           cerr << sample << " " << z_ij << " " << num_topics << "\n";
         topic_assignments[i][j] = z_ij;
@@ -186,7 +232,18 @@ int main(int argc, char** argv) {
 
     output_alignments(tgt_corpus, alignments);
     if (sample % 10 == 9) {
-      cerr << " [LLH=" << log_likelihood(underlying_ttable_params, diag_alignment_prior, src_corpus, underlying_ttable, alignments) << "]" << endl;
+      cerr << " [LLH=" << log_likelihood(underlying_ttable_params,
+                                         topical_ttable_params,
+                                         document_topic_params,
+                                         sentence_topic_params,
+                                         diag_alignment_prior,
+                                         src_corpus,
+                                         underlying_ttable,
+                                         topical_ttables,
+                                         document_topics,
+                                         sentence_topics,
+                                         alignments,
+                                         topic_assignments) << "]" << endl;
       if (sample % 30u == 29) {
         underlying_ttable_params.resample_hyperparameters(eng);
         topical_ttable_params.resample_hyperparameters(eng);
@@ -195,13 +252,27 @@ int main(int argc, char** argv) {
         diag_alignment_prior.resample_hyperparameters(alignments, src_corpus, eng);
       }
     } else { cerr << '.' << flush; }
+  
+    if (sample % 100u == 99) {
+      cerr << "=====BEGIN TTABLE=====\n";
+      show_ttable(underlying_ttable, src_dict, tgt_dict); 
+      for(auto& topical_ttable : topical_ttables) {
+        cerr << "====================\n";
+        show_ttable(topical_ttable, src_dict, tgt_dict);
+      }
+      cerr << "=====END TTABLE=====\n";
+    }
   }
 
-  if(src_vocab.size() < 100) {
-    show_ttable(underlying_ttable, src_dict, tgt_dict);
-    cerr << "====================\n";
-    show_ttable(topical_ttables[0], src_dict, tgt_dict);
-    show_ttable(topical_ttables[1], src_dict, tgt_dict);
+  if (src_vocab.size() < 1 || true) {
+    cerr << "=====BEGIN TTABLE=====\n";
+    show_ttable(underlying_ttable, src_dict, tgt_dict); 
+    for(auto& topical_ttable : topical_ttables) {
+      cerr << "====================\n";
+      show_ttable(topical_ttable, src_dict, tgt_dict);
+    }
+    cerr << "=====END TTABLE=====\n";
   }
+
   return 0;
 }
