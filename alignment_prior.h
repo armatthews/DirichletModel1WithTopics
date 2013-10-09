@@ -59,8 +59,10 @@ struct diagonal_alignment_prior : alignment_prior {
   double log_likelihood(const vector<vector<unsigned short>>& alignments, const vector<vector<unsigned>>& src_corpus, double p0, double tension) const {
     assert(src_corpus.size() == alignments.size());
 
-    const double p0_alpha = 1.0;
-    const double p0_beta = 100.0;
+    const double p0_alpha = 200000.0;
+    const double p0_beta = 2300000.0;
+    //const double p0_alpha = 1.0;
+    //const double p0_beta = 100.0;
     const double tension_shape = 7.0;
     const double tension_rate = 1.0;
 
