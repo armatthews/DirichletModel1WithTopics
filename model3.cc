@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <cstdlib>
 #include "boost/archive/text_oarchive.hpp"
+#include "boost/algorithm/string.hpp"
 #include "boost/program_options.hpp"
 
 #include "bilingual_corpus.h"
@@ -20,7 +21,7 @@ namespace po=boost::program_options;
 
 double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable_params,
                       const tied_parameter_resampler<crp<unsigned>>& underlying_ttable_params, 
-                      const tied_parameter_resampler<crp<unsigned>>& topical_ttable_params,
+                      const tied_parameter_resampler<crp<unsigned>>& sense_ttable_params,
                       const tied_parameter_resampler<crp<unsigned>>& topic_sense_table_params,
                       const tied_parameter_resampler<crp<unsigned>>& base_discourse_params,
                       const tied_parameter_resampler<crp<unsigned>>& document_discourse_params,
@@ -28,7 +29,7 @@ double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable
                       const vector<vector<unsigned>>& src_corpus,
                       const crp<unsigned>& base_ttable,
                       const vector<crp<unsigned>>& underlying_ttable,
-                      const vector<vector<crp<unsigned>>>& topical_ttables,
+                      const vector<vector<crp<unsigned>>>& sense_ttables,
                       const vector<vector<crp<unsigned>>>& topic_sense_table,
                       const crp<unsigned>& base_discourse,
                       const vector<crp<unsigned>>& document_discourses,
@@ -38,7 +39,7 @@ double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable
   double llh = 0.0;
   llh += base_ttable_params.log_likelihood();
   llh += underlying_ttable_params.log_likelihood();
-  llh += topical_ttable_params.log_likelihood();
+  llh += sense_ttable_params.log_likelihood();
   llh += topic_sense_table_params.log_likelihood();
   llh += base_discourse_params.log_likelihood();
   llh += document_discourse_params.log_likelihood();
@@ -46,9 +47,9 @@ double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable
   llh += base_ttable.log_likelihood();
   for (auto& crp : underlying_ttable)
     llh += crp.log_likelihood();
-  // This can cause NaNs
-  /*for (auto& topical_ttable : topical_ttables)
-    for (auto& crp : topical_ttable) {
+  // TODO: Figure out why this makes LLH return NaN
+  /*for (auto& sense_ttable : sense_ttables)
+    for (auto& crp : sense_ttable) {
       float prev = llh;
       llh += crp.log_likelihood();
       if (llh != llh) {
@@ -124,13 +125,13 @@ void output_alignments(vector<vector<unsigned>>& tgt_corpus, vector<vector<unsig
   }
 }
 
-void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<vector<crp<unsigned>>> topical_ttables, crp<unsigned>& base_discourse, vector<crp<unsigned>>& document_discourses, Dict& src_dict, Dict& tgt_dict, Dict& doc_dict, unsigned num_topics) {
+void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<vector<crp<unsigned>>> sense_ttables, crp<unsigned>& base_discourse, vector<crp<unsigned>>& document_discourses, Dict& src_dict, Dict& tgt_dict, Dict& doc_dict, unsigned num_topics) {
   double uniform_topic = 1.0 / num_topics;
   cerr << "=====BEGIN TTABLE=====\n";
   show_ttable(underlying_ttable, src_dict, tgt_dict); 
-  for (auto& topical_ttable : topical_ttables) {
+  for (auto& sense_ttable : sense_ttables) {
     cerr << "====================\n";
-    show_ttable(topical_ttable, src_dict, tgt_dict);
+    show_ttable(sense_ttable, src_dict, tgt_dict);
   }
   cerr << "=====END TTABLE=====\n";
 
@@ -145,6 +146,33 @@ void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<ve
     }
   }
   cerr << "=====END DOCUMENT TOPIC PROBS=====\n";
+}
+
+vector<vector<unsigned short>> load_alignment_file(const string& filename, const vector<vector<unsigned>>& src_corpus, const vector<vector<unsigned>>& tgt_corpus) {
+  ifstream in(filename);
+  string line;
+  int lc = 0;
+  vector<vector<unsigned short>> alignments(src_corpus.size());
+  while (getline(in, line)) {
+    ++lc;
+    int src_size = src_corpus[lc - 1].size();
+    int tgt_size = tgt_corpus[lc - 1].size();
+    vector<unsigned short> alignment(tgt_size, 0);
+    vector<string> links;
+    boost::split(links, line, boost::is_any_of(" "));
+    for (unsigned k = 0; k < links.size(); ++k) {
+      int dash_location = links[k].find('-');
+      int i = atoi(links[k].substr(0, dash_location).c_str());
+      int j = atoi(links[k].substr(dash_location + 1).c_str());
+      assert(i >= 0);
+      assert(i < src_size);
+      assert(j >= 0);
+      assert( j < tgt_size);
+      alignment[j] = i + 1;
+    }
+    alignments[lc - 1] = alignment;
+  }
+  return alignments;
 }
 
 void handler(int sig) {
@@ -163,6 +191,8 @@ int main(int argc, char** argv) {
     ("samples,n", po::value<int>()->required(), "Number of samples")
     ("topics,k", po::value<int>(), "Number of topics")
     ("senses,z", po::value<int>(), "Number of topics")
+    ("alignments,a", po::value<string>(), "Initial alignments")
+    ("fix_alignments,f", "Fix the alignments, not allowing them to vary")
     ("help", "Print help messages");
   po::variables_map args;
   try {
@@ -180,9 +210,12 @@ int main(int argc, char** argv) {
   }
 
   MT19937 eng;
-  string training_corpus_file = args["training_corpus"].as<string>();
+  const string training_corpus_file = args["training_corpus"].as<string>();
   const unsigned num_topics = (args.count("topics")) ? args["topics"].as<int>() : 2;
   const unsigned num_senses = (args.count("senses")) ? args["senses"].as<int>() : 3;
+  const bool fix_alignments = args.count("fix_alignments");
+  const bool have_initial_alignments = args.count("alignments");
+  const string initial_alignment_file = args.count("alignments") ? args["alignments"].as<string>() : "";
   diagonal_alignment_prior diag_alignment_prior(4.0, 0.01, true);
   const unsigned samples = args["samples"].as<int>();
   
@@ -220,43 +253,53 @@ int main(int argc, char** argv) {
   vector<vector<unsigned short>> topic_assignments;
   vector<vector<unsigned short>> sense_assignments;
   vector<vector<unsigned short>> alignments;
+  vector<vector<set<unsigned short>>> rev_alignments;
+  if (have_initial_alignments) {
+    cerr << "Loading alignments from " << initial_alignment_file << endl;
+    alignments = load_alignment_file(initial_alignment_file, src_corpus, tgt_corpus);
+  }
+  if (fix_alignments) {
+    cerr << "Alignments will be fixed" << endl;
+  }
 
   crp<unsigned> base_ttable(0.0, 0.001);
   vector<crp<unsigned>> underlying_ttable(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001));
-  vector<vector<crp<unsigned>>> topical_ttables(num_senses, vector<crp<unsigned>>(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001)));
+  vector<vector<crp<unsigned>>> sense_ttables(num_senses, vector<crp<unsigned>>(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001)));
 
   vector<crp<unsigned>> sense_table(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001));
   vector<vector<crp<unsigned>>> topic_sense_table(src_vocab.size() + 1, vector<crp<unsigned>>(num_topics, crp<unsigned>(0.0, 0.001)));
 
-  crp<unsigned> base_discourse(0.0, 0.5);
-  vector<crp<unsigned>> document_discourses(doc_dict.max() + 1, crp<unsigned>(0.0, 0.5));
+  crp<unsigned> base_discourse(0.0, 0.1);
+  vector<crp<unsigned>> document_discourses(doc_dict.max() + 1, crp<unsigned>(0.0, 0.1));
 
-  tied_parameter_resampler<crp<unsigned>> base_ttable_params(1,1,1,1,0.1,1);
-  tied_parameter_resampler<crp<unsigned>> underlying_ttable_params(1,1,1,1,0.1,1);
-  tied_parameter_resampler<crp<unsigned>> topical_ttable_params(1,1,1,1,0.1,1);
+  tied_parameter_resampler<crp<unsigned>>       base_ttable_params(1,1,1,1,0.1,uniform_target_word);
+  tied_parameter_resampler<crp<unsigned>> underlying_ttable_params(1,1,1,1,0.1,uniform_target_word);
+  tied_parameter_resampler<crp<unsigned>>    sense_ttable_params(1,1,1,0.1,uniform_target_word);
 
-  tied_parameter_resampler<crp<unsigned>> sense_table_params(1,1,1,1,0.1,1);
-  tied_parameter_resampler<crp<unsigned>> topic_sense_table_params(1,1,1,1,0.1,1);
+  tied_parameter_resampler<crp<unsigned>> sense_table_params(1,1,1,1,0.1,uniform_sense);
+  tied_parameter_resampler<crp<unsigned>> topic_sense_table_params(1,1,1,1,0.1,uniform_sense);
 
-  tied_parameter_resampler<crp<unsigned>> base_discourse_params(1,1,1,1,0.1,1);
-  tied_parameter_resampler<crp<unsigned>> document_discourse_params(1,1,1,1,0.1,1);
+  tied_parameter_resampler<crp<unsigned>> base_discourse_params(1,1,1,1,0.1,uniform_topic);
+  tied_parameter_resampler<crp<unsigned>> document_discourse_params(1,1,1,1,0.1,uniform_topic);
 
   topic_assignments.resize(src_corpus.size());
   sense_assignments.resize(src_corpus.size());
   alignments.resize(tgt_corpus.size());
+  rev_alignments.resize(tgt_corpus.size());
   for (unsigned i = 0; i < src_corpus.size(); ++i) {
     sense_assignments[i].resize(src_corpus[i].size());
     topic_assignments[i].resize(src_corpus[i].size());
   }
   for (unsigned i = 0; i < tgt_corpus.size(); ++i) {
     alignments[i].resize(tgt_corpus[i].size());
+    rev_alignments[i].resize(src_corpus[i].size());
   }
 
   base_ttable_params.insert(&base_ttable);
   for (unsigned i = 0; i < src_vocab.size() + 1; i++) {
     underlying_ttable_params.insert(&underlying_ttable[i]);
     for (unsigned j = 0; j < num_senses; j++ ) {
-      topical_ttable_params.insert(&topical_ttables[j][i]);
+      sense_ttable_params.insert(&sense_ttables[j][i]);
     }
   }
 
@@ -306,20 +349,18 @@ int main(int argc, char** argv) {
             base_discourse.decrement(d_im, eng);
           }
 
-          // When we decrement the z, we must also update the topical ttables
+          // When we decrement the z, we must also update the sense ttables
           if (topic_sense_table[s][d_im].decrement(z_im, eng)) {
             sense_table[s].decrement(z_im, eng);
           }
 
-          for (unsigned n = 0; n < tgt.size(); ++n) {
-            if (alignments[i][n] == m) {
-              const auto& t = tgt[n];
-              if (topical_ttables[z_im][s].decrement(t, eng)) {
-                if (underlying_ttable[s].decrement(t, eng)) {
-                  base_ttable.decrement(t, eng);
-                }
-              } 
-            }
+          for (unsigned short n : rev_alignments[i][m]) {
+            const auto& t = tgt[n];
+            if (sense_ttables[z_im][s].decrement(t, eng)) {
+              if (underlying_ttable[s].decrement(t, eng)) {
+                base_ttable.decrement(t, eng);
+              }
+            } 
           }
 
           // Find the probability of each topic
@@ -349,17 +390,15 @@ int main(int argc, char** argv) {
           base_discourse.increment(d_im, uniform_topic, eng);
         }
 
-        // Make sure to increment the affect entries in the topical_ttables!
+        // Make sure to increment the affect entries in the sense_ttables!
         if (topic_sense_table[s][d_im].increment(z_im, uniform_sense, eng)) {
           sense_table[s].increment(z_im, sense_probs[z_im], eng);
         }
-        for (unsigned n = 0; n < tgt.size(); ++n) {
-          if (alignments[i][n] == m) {
-            const auto& t = tgt[n];
-            if (topical_ttables[z_im][s].increment(t, underlying_ttable[s].prob(t, base_ttable.prob(t, uniform_target_word)), eng)) {
-              if (underlying_ttable[s].increment(t, base_ttable.prob(t, uniform_target_word), eng)) {
-                base_ttable.increment(t, uniform_target_word, eng);
-              }
+        for (unsigned short n : rev_alignments[i][m]) {
+          const auto& t = tgt[n];
+          if (sense_ttables[z_im][s].increment(t, underlying_ttable[s].prob(t, base_ttable.prob(t, uniform_target_word)), eng)) {
+            if (underlying_ttable[s].increment(t, base_ttable.prob(t, uniform_target_word), eng)) {
+              base_ttable.increment(t, uniform_target_word, eng);
             }
           }
         }
@@ -372,36 +411,42 @@ int main(int argc, char** argv) {
 
         if (sample == 0) {
           // random sample during the first iteration
-          a = static_cast<unsigned>(sample_uniform01<float>(eng) * src.size());
+          if (!fix_alignments) {
+            a = static_cast<unsigned>(sample_uniform01<float>(eng) * src.size());
+          }
           assert(a >= 0);
           assert(a < src.size());
         }
-        else {
-          if (topical_ttables[z][src[a]].decrement(t, eng)) {
+        else { 
+          rev_alignments[i][a].erase(n);
+          if (sense_ttables[z][src[a]].decrement(t, eng)) {
             if (underlying_ttable[src[a]].decrement(t, eng)) {
               base_ttable.decrement(t, eng);
             }
           }
 
           // Find the probability of each alignment link
-          a_probs.resize(src.size());
-          for (unsigned k = 0; k < src.size(); ++k) {
-            a_probs[k] = topical_ttables[z][src[k]].prob(t, underlying_ttable[src[k]].prob(t, base_ttable.prob(t, uniform_target_word)));
-            if (k == 0)
-                a_probs[k] *= diag_alignment_prior.null_prob(n, tgt.size(), src.size() - 1);
-          }
+          if (!fix_alignments) {
+            a_probs.resize(src.size());
+            for (unsigned k = 0; k < src.size(); ++k) {
+              a_probs[k] = sense_ttables[z][src[k]].prob(t, underlying_ttable[src[k]].prob(t, base_ttable.prob(t, uniform_target_word)));
+              if (k == 0)
+                  a_probs[k] *= diag_alignment_prior.null_prob(n, tgt.size(), src.size() - 1);
+           }
 
-          multinomial_distribution<double> mult(a_probs);
-          a = mult(eng);
+            multinomial_distribution<double> mult(a_probs);
+            a = mult(eng);
+          }
         }
 
         // Verify that the draw produced valid results 
         assert(a >= 0);
         assert(a < src.size());
+        rev_alignments[i][a].insert(n);
         z = sense_assignments[i][a];
 
         // Increment the CRPs with the new value
-        if (topical_ttables[z][src[a]].increment(t, underlying_ttable[src[a]].prob(t, base_ttable.prob(t, uniform_target_word)), eng)) {
+        if (sense_ttables[z][src[a]].increment(t, underlying_ttable[src[a]].prob(t, base_ttable.prob(t, uniform_target_word)), eng)) {
           if (underlying_ttable[src[a]].increment(t, base_ttable.prob(t, uniform_target_word), eng)) {
             base_ttable.increment(t, uniform_target_word, eng);
           }
@@ -413,7 +458,7 @@ int main(int argc, char** argv) {
     if (sample % 10 == 9) {
       cerr << " [LLH=" << log_likelihood(base_ttable_params,
                                          underlying_ttable_params,
-                                         topical_ttable_params,
+                                         sense_ttable_params,
                                          topic_sense_table_params,
                                          base_discourse_params,
                                          document_discourse_params,
@@ -421,7 +466,7 @@ int main(int argc, char** argv) {
                                          src_corpus,
                                          base_ttable,
                                          underlying_ttable,
-                                         topical_ttables,
+                                         sense_ttables,
                                          topic_sense_table,
                                          base_discourse,
                                          document_discourses,
@@ -430,7 +475,7 @@ int main(int argc, char** argv) {
                                          topic_assignments) << "]" << endl;
       if (sample % 30u == 29) {
         underlying_ttable_params.resample_hyperparameters(eng);
-        topical_ttable_params.resample_hyperparameters(eng);
+        sense_ttable_params.resample_hyperparameters(eng);
         sense_table_params.resample_hyperparameters(eng);
         topic_sense_table_params.resample_hyperparameters(eng);
         document_discourse_params.resample_hyperparameters(eng);
@@ -442,12 +487,12 @@ int main(int argc, char** argv) {
     }
   
     if (sample % 100u == 99) {
-      output_latent_variables(underlying_ttable, topical_ttables, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics);
+      output_latent_variables(underlying_ttable, sense_ttables, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics);
     }
   }
 
   if (true) {
-    output_latent_variables(underlying_ttable, topical_ttables, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics);
+    output_latent_variables(underlying_ttable, sense_ttables, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics);
   }
 
   return 0;
