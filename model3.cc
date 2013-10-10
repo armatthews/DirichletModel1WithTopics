@@ -22,6 +22,7 @@ namespace po=boost::program_options;
 double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable_params,
                       const tied_parameter_resampler<crp<unsigned>>& underlying_ttable_params, 
                       const tied_parameter_resampler<crp<unsigned>>& sense_ttable_params,
+                      const tied_parameter_resampler<crp<unsigned>>& sense_table_params,
                       const tied_parameter_resampler<crp<unsigned>>& topic_sense_table_params,
                       const tied_parameter_resampler<crp<unsigned>>& base_discourse_params,
                       const tied_parameter_resampler<crp<unsigned>>& document_discourse_params,
@@ -30,6 +31,7 @@ double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable
                       const crp<unsigned>& base_ttable,
                       const vector<crp<unsigned>>& underlying_ttable,
                       const vector<vector<crp<unsigned>>>& sense_ttables,
+                      const vector<crp<unsigned>>& sense_table,
                       const vector<vector<crp<unsigned>>>& topic_sense_table,
                       const crp<unsigned>& base_discourse,
                       const vector<crp<unsigned>>& document_discourses,
@@ -125,21 +127,46 @@ void output_alignments(vector<vector<unsigned>>& tgt_corpus, vector<vector<unsig
   }
 }
 
-void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<vector<crp<unsigned>>> sense_ttables, crp<unsigned>& base_discourse, vector<crp<unsigned>>& document_discourses, Dict& src_dict, Dict& tgt_dict, Dict& doc_dict, unsigned num_topics) {
+void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<vector<crp<unsigned>>> sense_ttables, vector<crp<unsigned>>& sense_table, vector<vector<crp<unsigned>>>& topic_sense_table, crp<unsigned>& base_discourse, vector<crp<unsigned>>& document_discourses, Dict& src_dict, Dict& tgt_dict, Dict& doc_dict, unsigned num_topics, unsigned num_senses, vector<double>& sense_probs) {
   double uniform_topic = 1.0 / num_topics;
+  double uniform_sense = 1.0 / num_senses;
   cerr << "=====BEGIN TTABLE=====\n";
   show_ttable(underlying_ttable, src_dict, tgt_dict); 
-  for (auto& sense_ttable : sense_ttables) {
-    cerr << "====================\n";
-    show_ttable(sense_ttable, src_dict, tgt_dict);
+  for (unsigned z = 0; z < num_senses; ++z) {
+    cerr << "======SENSE " << z << "=======\n";
+    show_ttable(sense_ttables[z], src_dict, tgt_dict);
   }
   cerr << "=====END TTABLE=====\n";
 
-  cerr << "=====START DOCUMENT TOPIC PROBS=====\n";
+  cerr << "=====BEGIN TOPIC-SENSE PROBS=====\n";
+  for (unsigned src_id = 0; src_id < underlying_ttable.size(); src_id++) {
+    cerr << src_dict.Convert(src_id) << "\t" << sense_table[src_id].num_customers()
+      << "\t" << sense_table[src_id].num_tables() << endl;
+    for (unsigned z = 0; z < num_senses; z++) {
+      cerr << "\t" << "Sense#" << z << "\t" << sense_table[src_id].prob(z, sense_probs[z]) << "\t"
+        << sense_table[src_id].num_customers(z) << "\t" << sense_table[src_id].num_tables(z) << endl;
+    }
+  }
+  for (unsigned d = 0; d < num_topics; d++) {
+    cerr << "=============TOPIC " << d << "=============\n";
+    for (unsigned src_id = 0; src_id < underlying_ttable.size(); src_id++) {
+      cerr << src_dict.Convert(src_id) << "\t" << topic_sense_table[src_id][d].num_customers()
+        << "\t" << topic_sense_table[src_id][d].num_tables() << endl;
+      for (unsigned z = 0; z < num_senses; z++) {
+        cerr << "\t" << "Sense#" << z << "\t"
+          << topic_sense_table[src_id][d].prob(z, uniform_sense) << "\t"
+          << topic_sense_table[src_id][d].num_customers(z) << "\t"
+          << topic_sense_table[src_id][d].num_tables(z) << endl;
+      }
+    }
+  }
+  cerr << "=====END TOPIC-SENSE PROBS=====\n";
+
+  cerr << "=====BEGIN DOCUMENT TOPIC PROBS=====\n";
   for (unsigned topic = 0; topic < num_topics; ++topic) {
     cerr << "\tTopic#" << topic << "\t" << base_discourse.prob(topic, uniform_topic) << endl;
   }
-  for(unsigned doc_id = 1; doc_id < doc_dict.max(); ++doc_id) {
+  for(unsigned doc_id = 1; doc_id < doc_dict.max() + 1; ++doc_id) {
     cerr << doc_dict.Convert(doc_id) << endl;
     for (unsigned topic = 0; topic < num_topics; ++topic) {
       cerr << "\tTopic#" << topic << "\t" << document_discourses[doc_id].prob(topic, uniform_topic) << endl;
@@ -191,6 +218,7 @@ int main(int argc, char** argv) {
     ("samples,n", po::value<int>()->required(), "Number of samples")
     ("topics,k", po::value<int>(), "Number of topics")
     ("senses,z", po::value<int>(), "Number of topics")
+    ("sense_penalty,r", po::value<double>(), "Penalty for each new sense")
     ("alignments,a", po::value<string>(), "Initial alignments")
     ("fix_alignments,f", "Fix the alignments, not allowing them to vary")
     ("help", "Print help messages");
@@ -213,6 +241,7 @@ int main(int argc, char** argv) {
   const string training_corpus_file = args["training_corpus"].as<string>();
   const unsigned num_topics = (args.count("topics")) ? args["topics"].as<int>() : 2;
   const unsigned num_senses = (args.count("senses")) ? args["senses"].as<int>() : 3;
+  const double new_sense_prob = (args.count("sense_penalty")) ? 1.0 - args["sense_penalty"].as<double>() : 0.7;
   const bool fix_alignments = args.count("fix_alignments");
   const bool have_initial_alignments = args.count("alignments");
   const string initial_alignment_file = args.count("alignments") ? args["alignments"].as<string>() : "";
@@ -232,7 +261,6 @@ int main(int argc, char** argv) {
   double uniform_target_word = 1.0 / tgt_vocab.size();
   double uniform_topic = 1.0 / num_topics;
   double uniform_sense = 1.0 / num_senses;
-  double new_sense_prob = 0.7;
   vector<double> sense_probs(num_senses);
   for(unsigned z = 0; z < num_senses; ++z) {
     double Z = (1 - pow(new_sense_prob, num_senses)) / (1 - new_sense_prob);
@@ -272,14 +300,14 @@ int main(int argc, char** argv) {
   crp<unsigned> base_discourse(0.0, 0.1);
   vector<crp<unsigned>> document_discourses(doc_dict.max() + 1, crp<unsigned>(0.0, 0.1));
 
-  tied_parameter_resampler<crp<unsigned>>       base_ttable_params(1,1,1,1,0.1,uniform_target_word);
+  tied_parameter_resampler<crp<unsigned>>       base_ttable_params(1,1,1,1,0.1,1.0);
   tied_parameter_resampler<crp<unsigned>> underlying_ttable_params(1,1,1,1,0.1,uniform_target_word);
-  tied_parameter_resampler<crp<unsigned>>    sense_ttable_params(1,1,1,0.1,uniform_target_word);
+  tied_parameter_resampler<crp<unsigned>>    sense_ttable_params(1,1,1,0.1,uniform_sense);
 
-  tied_parameter_resampler<crp<unsigned>> sense_table_params(1,1,1,1,0.1,uniform_sense);
+  tied_parameter_resampler<crp<unsigned>> sense_table_params(1,1,1,1,0.1,1.0);
   tied_parameter_resampler<crp<unsigned>> topic_sense_table_params(1,1,1,1,0.1,uniform_sense);
 
-  tied_parameter_resampler<crp<unsigned>> base_discourse_params(1,1,1,1,0.1,uniform_topic);
+  tied_parameter_resampler<crp<unsigned>> base_discourse_params(1,1,1,1,0.1,1.0);
   tied_parameter_resampler<crp<unsigned>> document_discourse_params(1,1,1,1,0.1,uniform_topic);
 
   topic_assignments.resize(src_corpus.size());
@@ -335,6 +363,7 @@ int main(int argc, char** argv) {
         unsigned short& z_im = sense_assignments[i][m];
         unsigned short& d_im = topic_assignments[i][m];
         if (sample == 0) {
+
           z_im = static_cast<unsigned>(sample_uniform01<float>(eng) * num_senses);
           assert(z_im >= 0);
           assert(z_im < num_senses);
@@ -365,14 +394,18 @@ int main(int argc, char** argv) {
 
           // Find the probability of each topic
           for (unsigned k = 0; k < num_topics; ++k) {
-            d_probs[k] = document_discourses[doc_id].prob(k, base_discourse.prob(k, uniform_topic));
+            d_probs[k] = document_discourses[doc_id].prob(k, base_discourse.prob(k, uniform_topic)) * topic_sense_table[s][k].prob(z_im, uniform_sense);
           }
 
           multinomial_distribution<double> d_mult(d_probs);
           d_im = d_mult(eng);
 
           for (unsigned k = 0; k < num_senses; ++k) {
-            z_probs[k] = topic_sense_table[s][d_im].prob(k, uniform_sense);
+            z_probs[k] = topic_sense_table[s][d_im].prob(k, sense_table[s].prob(k, sense_probs[k]));
+            for (unsigned short n : rev_alignments[i][m]) {
+              const auto& t = tgt[n];
+              z_probs[k] *= sense_ttables[k][s].prob(t, underlying_ttable[s].prob(t, base_ttable.prob(t, uniform_target_word)));
+            }
           }
 
           multinomial_distribution<double> z_mult(z_probs);
@@ -391,7 +424,7 @@ int main(int argc, char** argv) {
         }
 
         // Make sure to increment the affect entries in the sense_ttables!
-        if (topic_sense_table[s][d_im].increment(z_im, uniform_sense, eng)) {
+        if (topic_sense_table[s][d_im].increment(z_im, sense_table[s].prob(z_im, sense_probs[z_im]), eng)) {
           sense_table[s].increment(z_im, sense_probs[z_im], eng);
         }
         for (unsigned short n : rev_alignments[i][m]) {
@@ -459,6 +492,7 @@ int main(int argc, char** argv) {
       cerr << " [LLH=" << log_likelihood(base_ttable_params,
                                          underlying_ttable_params,
                                          sense_ttable_params,
+                                         sense_table_params,
                                          topic_sense_table_params,
                                          base_discourse_params,
                                          document_discourse_params,
@@ -467,6 +501,7 @@ int main(int argc, char** argv) {
                                          base_ttable,
                                          underlying_ttable,
                                          sense_ttables,
+                                         sense_table,
                                          topic_sense_table,
                                          base_discourse,
                                          document_discourses,
@@ -487,12 +522,12 @@ int main(int argc, char** argv) {
     }
   
     if (sample % 100u == 99) {
-      output_latent_variables(underlying_ttable, sense_ttables, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics);
+      output_latent_variables(underlying_ttable, sense_ttables, sense_table, topic_sense_table, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics, num_senses, sense_probs);
     }
   }
 
   if (true) {
-    output_latent_variables(underlying_ttable, sense_ttables, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics);
+    output_latent_variables(underlying_ttable, sense_ttables, sense_table, topic_sense_table, base_discourse, document_discourses, src_dict, tgt_dict, doc_dict, num_topics, num_senses, sense_probs);
   }
 
   return 0;
