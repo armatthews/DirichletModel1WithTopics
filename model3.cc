@@ -87,35 +87,6 @@ double log_likelihood(const tied_parameter_resampler<crp<unsigned>>& base_ttable
   return llh;
 }
 
-void show_ttable(vector<crp<unsigned>>& underlying_ttable, Dict& src_dict, Dict& tgt_dict) {
-  vector<unsigned> ind(tgt_dict.max() + 1);
-  for (unsigned tgt_id = 0; tgt_id < tgt_dict.max() + 1; tgt_id++)
-    ind[tgt_id] = tgt_id;
-
-  for (unsigned src_id = 0; src_id < underlying_ttable.size(); src_id++) {
-    crp<unsigned>& p = underlying_ttable[src_id];
-    if (p.num_customers() == 0)
-      continue;
-
-    cerr << src_dict.Convert(src_id) << "\t" << underlying_ttable[src_id].num_customers()
-      << "\t" << underlying_ttable[src_id].num_tables() << endl;
-    //partial_sort(ind.begin(), ind.begin() + 10, ind.end(), [&p, &tgt_dict](unsigned alignments, unsigned b) { return p.prob(alignments, 1.0 / tgt_dict.max()) > p.prob(b, 1.0 / tgt_dict.max()); });
-//    for (unsigned i = 0; i < 10; i++) {
-    sort(ind.begin(), ind.end(), [&p, &tgt_dict](unsigned alignments, unsigned b) { return p.prob(alignments, 1.0 / tgt_dict.max()) > p.prob(b, 1.0 / tgt_dict.max()); });
-    for (unsigned i = 0; i < ind.size(); ++i) {
-      unsigned tgt_id = ind[i];
-      if (p.num_tables(tgt_id) > 0) {
-        cerr << "\t" << tgt_dict.Convert(tgt_id) << "\t" << p.prob(tgt_id, 1.0 / tgt_dict.max())
-          << "\t" << p.num_customers(tgt_id) << "\t" << p.num_tables(tgt_id) << endl;
-      }
-      else {
-        cerr << "\t" << "[other]" << "\t" << p.prob(tgt_id, 1.0 / tgt_dict.max()) * (tgt_dict.max() - i) << endl;
-        break;
-      }
-    }
-  }
-}
-
 void output_alignments(vector<vector<unsigned>>& tgt_corpus, vector<vector<unsigned short>>& alignments) {
   for (unsigned i = 0; i < tgt_corpus.size(); i++) {
     for (unsigned j = 0; j < tgt_corpus[i].size(); j++) {
@@ -130,11 +101,49 @@ void output_alignments(vector<vector<unsigned>>& tgt_corpus, vector<vector<unsig
 void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<vector<crp<unsigned>>> sense_ttables, vector<crp<unsigned>>& sense_table, vector<vector<crp<unsigned>>>& topic_sense_table, crp<unsigned>& base_discourse, vector<crp<unsigned>>& document_discourses, Dict& src_dict, Dict& tgt_dict, Dict& doc_dict, unsigned num_topics, unsigned num_senses, vector<double>& sense_probs) {
   double uniform_topic = 1.0 / num_topics;
   double uniform_sense = 1.0 / num_senses;
+  vector<unsigned> ind(tgt_dict.max() + 1);
+  for (unsigned tgt_id = 0; tgt_id < tgt_dict.max() + 1; tgt_id++)
+    ind[tgt_id] = tgt_id;
+
   cerr << "=====BEGIN TTABLE=====\n";
-  show_ttable(underlying_ttable, src_dict, tgt_dict); 
-  for (unsigned z = 0; z < num_senses; ++z) {
-    cerr << "======SENSE " << z << "=======\n";
-    show_ttable(sense_ttables[z], src_dict, tgt_dict);
+  for (unsigned src_id = 0; src_id < underlying_ttable.size(); src_id++) {
+    crp<unsigned>& p = underlying_ttable[src_id];
+    if (p.num_customers() == 0)
+      continue;
+    cerr << src_dict.Convert(src_id) << "\t" << p.num_customers()
+      << "\t" << p.num_tables() << endl;
+    vector<unsigned> translations;
+    for (auto it = p.begin(); it != p.end(); ++it) {
+      translations.push_back(it->first);
+    }
+    sort(translations.begin(), translations.end(), [&p](unsigned a, unsigned b) { return p.num_customers(a) > p.num_customers(b); });
+    for (unsigned i = 0; i < translations.size(); ++i) {
+      unsigned tgt_id = translations[i]; 
+      cerr << "\t" << tgt_dict.Convert(tgt_id) << "\t" << p.prob(tgt_id, 1.0 / tgt_dict.max())
+        << "\t" << p.num_customers(tgt_id) << "\t" << p.num_tables(tgt_id) << endl;
+    } 
+    cerr << "\t" << "[other]" << "\t" << p.prob(0, 1.0 / tgt_dict.max()) * (tgt_dict.max() - translations.size()) << endl;
+  }
+  for (unsigned z = 0; z < num_senses; z++) {
+    cerr << "=======SENSE " << z << "========\n";
+    for (unsigned src_id = 0; src_id < sense_ttables[z].size(); src_id++) {
+      crp<unsigned>& p = sense_ttables[z][src_id];
+      if (p.num_customers() == 0)
+        continue;
+      cerr << src_dict.Convert(src_id) << "\t" << p.num_customers()
+        << "\t" << p.num_tables() << endl;
+      vector<unsigned> translations;
+      for (auto it = p.begin(); it != p.end(); ++it) {
+        translations.push_back(it->first);
+      }
+      sort(translations.begin(), translations.end(), [&p](unsigned a, unsigned b) { return p.num_customers(a) > p.num_customers(b); });
+      for (unsigned i = 0; i < translations.size(); ++i) {
+        unsigned tgt_id = translations[i];
+        cerr << "\t" << tgt_dict.Convert(tgt_id) << "\t" << p.prob(tgt_id, 1.0 / tgt_dict.max())
+          << "\t" << p.num_customers(tgt_id) << "\t" << p.num_tables(tgt_id) << endl;
+      }
+      cerr << "\t" << "[other]" << "\t" << p.prob(0, 1.0 / tgt_dict.max()) * (tgt_dict.max() - translations.size()) << endl;
+    }
   }
   cerr << "=====END TTABLE=====\n";
 
@@ -154,7 +163,7 @@ void output_latent_variables(vector<crp<unsigned>>& underlying_ttable, vector<ve
         << "\t" << topic_sense_table[src_id][d].num_tables() << endl;
       for (unsigned z = 0; z < num_senses; z++) {
         cerr << "\t" << "Sense#" << z << "\t"
-          << topic_sense_table[src_id][d].prob(z, uniform_sense) << "\t"
+          << topic_sense_table[src_id][d].prob(z, sense_table[src_id].prob(z, uniform_sense)) << "\t"
           << topic_sense_table[src_id][d].num_customers(z) << "\t"
           << topic_sense_table[src_id][d].num_tables(z) << endl;
       }
@@ -290,15 +299,15 @@ int main(int argc, char** argv) {
     cerr << "Alignments will be fixed" << endl;
   }
 
-  crp<unsigned> base_ttable(0.0, 0.001);
-  vector<crp<unsigned>> underlying_ttable(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001));
-  vector<vector<crp<unsigned>>> sense_ttables(num_senses, vector<crp<unsigned>>(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001)));
+  crp<unsigned> base_ttable(0.0, 1.0);
+  vector<crp<unsigned>> underlying_ttable(src_vocab.size() + 1, crp<unsigned>(0.1, uniform_target_word));
+  vector<vector<crp<unsigned>>> sense_ttables(num_senses, vector<crp<unsigned>>(src_vocab.size() + 1, crp<unsigned>(0.1, uniform_sense)));
 
-  vector<crp<unsigned>> sense_table(src_vocab.size() + 1, crp<unsigned>(0.0, 0.001));
-  vector<vector<crp<unsigned>>> topic_sense_table(src_vocab.size() + 1, vector<crp<unsigned>>(num_topics, crp<unsigned>(0.0, 0.001)));
+  vector<crp<unsigned>> sense_table(src_vocab.size() + 1, crp<unsigned>(0.0, 1.0));
+  vector<vector<crp<unsigned>>> topic_sense_table(src_vocab.size() + 1, vector<crp<unsigned>>(num_topics, crp<unsigned>(0.0, uniform_sense)));
 
-  crp<unsigned> base_discourse(0.0, 0.1);
-  vector<crp<unsigned>> document_discourses(doc_dict.max() + 1, crp<unsigned>(0.0, 0.1));
+  crp<unsigned> base_discourse(0.0, 1.0);
+  vector<crp<unsigned>> document_discourses(doc_dict.max() + 1, crp<unsigned>(0.0, uniform_topic));
 
   tied_parameter_resampler<crp<unsigned>>       base_ttable_params(1,1,1,1,0.1,1.0);
   tied_parameter_resampler<crp<unsigned>> underlying_ttable_params(1,1,1,1,0.1,uniform_target_word);
@@ -365,10 +374,14 @@ int main(int argc, char** argv) {
         if (sample == 0) {
 
           z_im = static_cast<unsigned>(sample_uniform01<float>(eng) * num_senses);
+          if (z_im == num_senses) // This should never happen, but there seems to be a bug in the STL...
+            z_im = num_senses - 1;
           assert(z_im >= 0);
           assert(z_im < num_senses);
  
-          d_im = static_cast<unsigned>(sample_uniform01<float>(eng) * num_topics); 
+          d_im = static_cast<unsigned>(sample_uniform01<float>(eng) * num_topics);
+          if (d_im == num_topics)
+            d_im = num_topics - 1;
           assert(d_im >= 0);
           assert(d_im < num_topics);
         }
@@ -464,7 +477,9 @@ int main(int argc, char** argv) {
             for (unsigned k = 0; k < src.size(); ++k) {
               a_probs[k] = sense_ttables[z][src[k]].prob(t, underlying_ttable[src[k]].prob(t, base_ttable.prob(t, uniform_target_word)));
               if (k == 0)
-                  a_probs[k] *= diag_alignment_prior.null_prob(n, tgt.size(), src.size() - 1);
+                a_probs[k] *= diag_alignment_prior.null_prob(n, tgt.size(), src.size() - 1);
+              else
+                a_probs[k] = diag_alignment_prior.prob(j + 1, k, tgt.size(), src.size() - 1);
            }
 
             multinomial_distribution<double> mult(a_probs);
