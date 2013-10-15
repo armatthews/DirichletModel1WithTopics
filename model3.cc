@@ -479,7 +479,7 @@ int main(int argc, char** argv) {
               if (k == 0)
                 a_probs[k] *= diag_alignment_prior.null_prob(n, tgt.size(), src.size() - 1);
               else
-                a_probs[k] = diag_alignment_prior.prob(j + 1, k, tgt.size(), src.size() - 1);
+                a_probs[k] = diag_alignment_prior.prob(n + 1, k, tgt.size(), src.size() - 1);
            }
 
             multinomial_distribution<double> mult(a_probs);
