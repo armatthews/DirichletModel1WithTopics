@@ -15,6 +15,7 @@ struct alignment_prior {
   // m is length of target sentence
   // n is length of source sentence (not counting NULL)
   bool use_null;
+  virtual ~alignment_prior() {}
   virtual double prob(unsigned short i, unsigned short j, unsigned short m, unsigned short n) const = 0;
   virtual double null_prob(unsigned short i, unsigned short m, unsigned short n) const = 0;
   virtual double log_likelihood(const vector<vector<unsigned short>>& alignments, const vector<vector<unsigned>>& src_corpus) const = 0;
@@ -22,6 +23,12 @@ struct alignment_prior {
 
 // A uniform pure IBM1-style prior on alignments
 struct uniform_alignment_prior : alignment_prior {
+  uniform_alignment_prior(bool use_null) {
+    this->use_null = use_null;
+  }
+
+  ~uniform_alignment_prior() {}
+
   double prob(unsigned short i, unsigned short j, unsigned short m, unsigned short n) const override {
     return 1.0;
   }
@@ -44,6 +51,8 @@ struct diagonal_alignment_prior : alignment_prior {
     this->use_null = use_null;
   }
 
+  ~diagonal_alignment_prior() {}
+
   double prob(unsigned short i, unsigned short j, unsigned short m, unsigned short n) const override {
     return (1.0 - p0) * exp(-tension * abs(1.0 * i / m - 1.0 * j / n));
   }
@@ -65,8 +74,8 @@ struct diagonal_alignment_prior : alignment_prior {
     const double target_words_in_corpus = 3000000;
     const double p0_alpha = 0.08 * target_words_in_corpus;
     const double p0_beta = 0.92 * target_words_in_corpus;;
-    const double tension_shape = 7.0;
-    const double tension_rate = 1.0;
+    const double tension_shape = 70.0;
+    const double tension_rate = 0.1;
 
     double llh = Md::log_beta_density(p0, p0_alpha, p0_beta) +
                  Md::log_gamma_density(tension, tension_shape, tension_rate);
