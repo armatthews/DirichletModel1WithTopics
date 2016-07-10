@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
     ("training_corpus,i", po::value<string>()->required(), "Training corpus, in format of source ||| target or docid ||| source ||| target")
     ("samples,n", po::value<int>()->required(), "Number of samples")
     ("alignments,a", po::value<string>(), "Initial alignments")
-    ("quiet,q", po::value<string>(), "Don't output any of the latent variables -- just the alignments, please.")
+    ("quiet,q", "Don't output any of the latent variables -- just the alignments, please.")
     ("help", "Print help messages");
   po::variables_map args;
   try {
