@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
     ("training_corpus,i", po::value<string>()->required(), "Training corpus, in format of source ||| target or docid ||| source ||| target")
     ("samples,n", po::value<int>()->required(), "Number of samples")
     ("alignments,a", po::value<string>(), "Initial alignments")
+    ("quiet,q", po::value<string>(), "Don't output any of the latent variables -- just the alignments, please.")
     ("help", "Print help messages");
   po::variables_map args;
   try {
@@ -139,6 +140,7 @@ int main(int argc, char** argv) {
   const string initial_alignment_file = args.count("alignments") ? args["alignments"].as<string>() : "";
   diagonal_alignment_prior diag_alignment_prior(4.0, 0.01, true);
   const unsigned samples = args["samples"].as<int>();
+  bool quiet = args.count("quiet") > 0;
   
   Dict src_dict;
   Dict tgt_dict;
@@ -267,12 +269,12 @@ int main(int argc, char** argv) {
       cerr << '.' << flush;
     }
   
-    if (sample % 100u == 99) {
+    if (sample % 100u == 99 && !quiet) {
       output_latent_variables(underlying_ttable, src_dict, tgt_dict, doc_dict);
     }
   }
 
-  if (true) {
+  if (true && !quiet) {
     output_latent_variables(underlying_ttable, src_dict, tgt_dict, doc_dict);
   }
 
